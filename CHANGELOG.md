@@ -1,0 +1,115 @@
+# 变更日志
+
+所有重要的版本更新都会记录在此文件中。
+
+## [v0.5.1](https://gitee.com/lorock/miaokun-log/releases/v0.5.1) - 2026-06-05
+
+### 🎨 UI优化
+- 移除重复副标题，简化头部布局
+- 优化上下文行数默认值：前3行，后5行（符合业内日志排查习惯）
+
+### 🔧 功能改进
+- 更新命令行版本号至 0.5.1
+
+### 🐛 问题修复
+- 修复 tsconfig.json 中 `ignoreDeprecations` 选项导致 vue-tsc 构建失败问题
+
+### 📝 文档更新
+- 更新 CHANGELOG.md 记录版本历史
+
+## [v0.5.0](https://gitee.com/lorock/miaokun-log/releases/v0.5.0) - 2026-06-04
+
+### 🎉 新增功能
+- 新增 Web 界面，提供可视化日志搜索体验
+  - 实时日志搜索（支持正则表达式）
+  - 按日志级别过滤（ERROR / WARN / INFO / DEBUG / TRACE）
+  - 时间范围过滤和多路径选择
+  - TraceId 跨文件追踪
+  - 日志级别选择后自动触发搜索
+  - 默认开启忽略大小写搜索
+- 新增 `--verbose/-v` 日志级别控制
+  - 默认静默模式，仅在需要排查问题时开启
+  - `-v`：显示 API 请求/响应日志（路径、状态码、耗时）
+  - `-vv`：显示完整调试信息（请求参数、搜索中间结果、处理详情）
+
+### 🎨 UI 优化
+- 更新 Web 界面头部设计：品牌名+产品名组合（喵坤®日志排查工具）
+- 优化配色方案，使用紫色系主色调，提升视觉一致性
+- 优化 Logo 交互：点击放大、悬停显示品牌名提示
+- 优化统计信息展示，整合到搜索卡片中，减少页面高度占用
+- 修复页脚链接文字（GitHub → Gitee）
+
+### 🔧 配置优化
+- 修改默认端口配置，避免与常用端口冲突
+  - 服务默认端口：`8080` → `9528`（后端 API + 前端静态资源统一端口）
+- API 日志默认关闭，仅错误信息始终输出，保证生产环境运行效率
+
+### 🐛 问题修复
+- 修复 SSE 流式接口（`/api/v1/search/stream`、`/api/v1/trace`）无法推送的问题
+  - 自定义 `responseWriter` 未实现 `http.Flusher` 接口，导致 `Flusher` 断言失败
+  - 已为包装器添加 `Flush()` 方法，正确代理到底层 `ResponseWriter`
+
+### 📝 文档更新
+- README 新增 serve 命令使用说明和端口说明
+- 更新 CHANGELOG.md 记录版本历史
+- README 添加品牌 Logo 和知识产权信息（商标、版权）
+
+## [v0.4.2](https://gitee.com/lorock/miaokun-log/releases/v0.4.2) - 2025-12-15
+
+### 🐛 问题修复
+- 修复 `--no-banner` 选项不生效的问题（将 banner 打印逻辑移至 `PersistentPreRun` 回调）
+- 修复搜索无结果时无提示信息的问题（添加友好提示）
+
+### 📝 文档优化
+- 优化 README 文档结构，合并重复内容
+- 创建 CHANGELOG.md 分离版本历史
+- 更新工具定位，支持多种语言日志
+
+## [v0.4.1](https://gitee.com/lorock/miaokun-log/releases/v0.4.1) - 2025-11-20
+
+### 🆕 新增功能
+- 新增 Go 语言日志格式支持：zap JSON、zerolog JSON、logrus 文本/JSON、slog JSON、标准库 log
+- 更新工具定位，支持多种语言日志（Java / Go / Python / Node.js 等）
+
+### 🐛 问题修复
+- 修复 ripgrep 单文件搜索时不输出文件名的问题（添加 -H 参数强制显示文件名）
+
+### 📝 文档更新
+- 更新文档，添加适用场景和不适用场景说明
+- 大幅增强帮助信息，提升用户体验：添加特性列表、快速开始、进阶用法、完整示例
+
+## [v0.4.0](https://gitee.com/lorock/miaokun-log/releases/v0.4.0) - 2025-10-15
+
+### 🚀 性能优化
+- 实现流式处理架构，实时输出搜索结果
+- 优化内存使用，支持处理 100G+ 大文件
+- 增强稳定性，避免大文件搜索时的内存溢出
+
+### 🔧 功能改进
+- 改进时间过滤集成，支持流式处理中的实时过滤
+- 完善文档和使用说明
+
+## [v0.3.0](https://gitee.com/lorock/miaokun-log/releases/v0.3.0) - 2025-09-20
+
+### 🆕 新增功能
+- 新增 `--jq` 参数，内置 jq 查询支持（基于 gojq）
+- 新增 `-B/--before` 和 `-A/--after` 选项，支持上下文显示
+
+### 🔧 功能改进
+- 改进 JSON 输出格式，优化可读性
+
+## [v0.2.0](https://gitee.com/lorock/miaokun-log/releases/v0.2.0) - 2025-08-15
+
+### 🆕 新增功能
+- 新增 `stats` 命令，支持日志级别统计和文件分布分析
+- 新增 `--level` 选项，按日志级别过滤搜索
+- 新增 `-i/--ignore-case` 选项，支持大小写不敏感搜索
+- 新增 `grep` 命令作为 search 的别名
+
+### 🎨 用户体验
+- 改进输出格式，增加彩色进度条
+
+## [v0.1.0](https://gitee.com/lorock/miaokun-log/releases/v0.1.0) - 2025-07-01
+
+### 🎉 初始版本
+- 支持基础搜索、trace 关联、list 文件

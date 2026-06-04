@@ -1,0 +1,51 @@
+# 编译产物
+mk-*
+
+# 构建输出目录
+bin/
+web/dist
+internal/server/web/dist/
+
+# Go 模块缓存
+go.sum
+
+# 临时文件
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+web/node_modules
+
+# 编辑器配置
+.vscode/
+.workbuddy/
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 日志文件
+logs/
+
+# 缓存目录
+.cache/
+*.cache
+
+# 配置文件（示例配置应该保留）
+.miaokun.yaml
+!*.example.yaml
+
+# 测试输出
+coverage.out
+*.test
+
+# macOS 特定
+._*
+.Spotlight-V100
+.Trashes

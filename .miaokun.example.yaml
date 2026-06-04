@@ -1,0 +1,14 @@
+# 喵坤配置文件示例
+# 复制为 ~/.miaokun.yaml 生效
+
+# 默认搜索路径
+default_paths:
+  - /var/log
+  - /opt/logs
+  - /var/log/app
+
+# 默认扫描最近多少天的文件
+since_days: 7
+
+# 缓存目录
+cache_dir: /tmp/miaokun-cache
