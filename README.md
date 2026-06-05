@@ -251,3 +251,6 @@ miaokun-log/
 ---
 
 **喵坤<sup>®</sup>，让技术人的工作更轻松**
+## 📜 许可证
+
+本项目采用 MIT 开源协议。详见 [LICENSE](LICENSE) 文件。
