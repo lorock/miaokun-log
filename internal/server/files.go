@@ -50,6 +50,7 @@ type APIError struct {
 	Details string `json:"details,omitempty"`
 }
 
+
 // Sensitive directories that should be excluded from file browsing for security
 // Note: /home is intentionally excluded to allow users to browse their own home directory
 var sensitiveDirs = []string{
@@ -169,7 +170,8 @@ func handleFileList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Filter and collect file information
-	var allFiles []FileInfo
+	// 注意：使用 make 初始化空切片，避免 JSON 序列化为 null
+	allFiles := make([]FileInfo, 0)
 	cutoff := time.Now().Add(-time.Duration(req.Since * 24 * float64(time.Hour)))
 
 	for _, entry := range entries {
@@ -349,7 +351,13 @@ func paginate(files []FileInfo, page, pageSize int) ([]FileInfo, Pagination) {
 		end = total
 	}
 
-	return files[start:end], Pagination{
+	// 确保返回非 nil 切片，JSON 序列化为 [] 而不是 null
+	result := make([]FileInfo, 0)
+	if start < end {
+		result = append(result, files[start:end]...)
+	}
+
+	return result, Pagination{
 		Page:       page,
 		PageSize:   pageSize,
 		Total:      total,

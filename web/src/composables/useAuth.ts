@@ -147,8 +147,9 @@ const createAuthInterceptor = () => {
       }
 
       try {
-        const response = await originalFetchRef(url, newOptions);
+        let response = await originalFetchRef(url, newOptions);
 
+        // Handle 401: try token refresh first, only logout if refresh fails
         if (response.status === 401) {
           let errorMessage = '登录已过期，请重新登录';
           let errorCode = '';
@@ -170,11 +171,30 @@ const createAuthInterceptor = () => {
             url.endsWith('/api/v1/auth/logout');
 
           if (!isAuthEndpoint) {
-            await logout();
-            triggerEvent(AUTH_EVENTS.UNAUTHORIZED, {
-              message: errorMessage,
-              code: errorCode,
-            });
+            // Try to refresh token first
+            const refreshSuccess = await refreshToken();
+            if (refreshSuccess && authState.token?.access_token) {
+              // Token refreshed successfully - retry the original request
+              (newOptions.headers as Record<string, string>).Authorization =
+                `Bearer ${authState.token.access_token}`;
+              try {
+                response = await originalFetchRef(url, newOptions);
+              } catch (retryError) {
+                // Retry failed - fall through to logout
+                await logout();
+                triggerEvent(AUTH_EVENTS.UNAUTHORIZED, {
+                  message: errorMessage,
+                  code: errorCode,
+                });
+              }
+            } else {
+              // Refresh failed - logout and notify
+              await logout();
+              triggerEvent(AUTH_EVENTS.UNAUTHORIZED, {
+                message: errorMessage,
+                code: errorCode,
+              });
+            }
           }
         }
 

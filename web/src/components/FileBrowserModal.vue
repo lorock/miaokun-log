@@ -4,11 +4,9 @@
     title="📁 服务器文件浏览"
     width="90%"
     max-width="1200px"
-    :close-on-click-modal="true"
+    :close-on-click-modal="false"
     :close-on-press-escape="true"
-    :before-close="handleBeforeClose"
     class="file-browser-modal"
-    @close="handleClose"
   >
     <!-- 搜索和工具栏 -->
     <div class="modal-toolbar">
@@ -212,10 +210,6 @@ const dialogVisible = computed({
   set: (val) => emit('update:visible', val),
 });
 
-const handleClose = () => {
-  emit('update:visible', false);
-};
-
 const {
   files,
   pagination,
@@ -276,8 +270,11 @@ const filteredFiles = computed(() => {
 
 const refreshFiles = () => {
   currentPage.value = 1;
+  const pathToFetch = currentPath.value && currentPath.value.trim() !== ''
+    ? currentPath.value
+    : undefined;
   fetchFiles({
-    path: currentPath.value || undefined,
+    path: pathToFetch,
     page: 1,
     page_size: currentPageSize.value,
   });
@@ -300,12 +297,21 @@ const handlePageChange = (page: number) => {
 };
 
 const navigateTo = (path: string) => {
-  currentPath.value = path;
+  if (!path || path.trim() === '') {
+    currentPath.value = '/';
+  } else {
+    currentPath.value = path;
+  }
   refreshFiles();
 };
 
 const navigateToPath = (path: string) => {
-  currentPath.value = path;
+  // 面包屑点击：第一个元素是 ''，代表根目录
+  if (!path || path.trim() === '') {
+    currentPath.value = '/';
+  } else {
+    currentPath.value = path;
+  }
   refreshFiles();
 };
 
@@ -317,10 +323,6 @@ const handleRowClick = (file: FileInfo) => {
 
 const handleSelect = (file: FileInfo) => {
   emit('select', file);
-  emit('update:visible', false);
-};
-
-const handleBeforeClose = () => {
   emit('update:visible', false);
 };
 

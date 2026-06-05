@@ -17,7 +17,6 @@ export function useFileList() {
 
   const fetchFiles = async (params: FileListRequest = {}) => {
     loading.value = true;
-    error.value = null;
 
     try {
       const queryParams = new URLSearchParams();
@@ -36,28 +35,36 @@ export function useFileList() {
         headers,
       });
 
-      const data: FileListResponse = await res.json();
+      let data: FileListResponse | null = null;
+      try {
+        data = await res.json();
+      } catch (parseErr) {
+        // Response body may not be JSON - handle gracefully
+      }
 
-      if (data.success && res.ok) {
-        files.value = data.data;
+      if (data && data.success && res.ok) {
+        // 正常返回数据，更新文件列表，清除错误
+        files.value = data.data || [];
         if (data.pagination) {
-          pagination.page = data.pagination.page;
-          pagination.page_size = data.pagination.page_size;
-          pagination.total = data.pagination.total;
-          pagination.total_pages = data.pagination.total_pages;
-          pagination.has_next = data.pagination.has_next;
-          pagination.has_prev = data.pagination.has_prev;
+          pagination.page = data.pagination.page ?? pagination.page;
+          pagination.page_size = data.pagination.page_size ?? pagination.page_size;
+          pagination.total = data.pagination.total ?? pagination.total;
+          pagination.total_pages = data.pagination.total_pages ?? pagination.total_pages;
+          pagination.has_next = data.pagination.has_next ?? false;
+          pagination.has_prev = data.pagination.has_prev ?? false;
         }
+        error.value = null;
       } else if (res.status === 401) {
-        error.value = '登录已过期，请重新登录';
-        files.value = [];
+        // 401 由 auth interceptor 处理，这里保持原有数据，不清空
+        error.value = data?.error?.message || '登录已过期，请重新登录';
+        // 注意：不调用 files.value = [] 以保持模态框打开
       } else {
-        error.value = data.error?.message || '加载文件列表失败';
-        files.value = [];
+        // 普通错误（如路径无效）：设置错误消息，不清空文件列表
+        // 这样空目录浏览失败时用户能看到错误，而不是模态框消失
+        error.value = data?.error?.message || '加载文件列表失败';
       }
     } catch (e) {
       error.value = '网络请求失败，请检查服务器连接';
-      files.value = [];
       console.warn('Failed to fetch files:', e);
     } finally {
       loading.value = false;

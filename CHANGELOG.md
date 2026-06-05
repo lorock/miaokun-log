@@ -2,6 +2,31 @@
 
 所有重要的版本更新都会记录在此文件中。
 
+## [v0.6.1](https://gitee.com/lorock/miaokun-log/releases/v0.6.1) - 2026-06-06
+
+### 🐛 问题修复
+
+- **修复进入空目录时文件浏览模态框消失问题**
+  - 后端 `files.go`：`var allFiles []FileInfo` 改为 `allFiles := make([]FileInfo, 0)`
+  - 后端 `files.go`：`paginate` 函数保证返回非 nil 切片，JSON 序列化为 `[]` 而非 `null`
+  - 前端 `FileBrowserModal.vue`：移除 `before-close` + `@close` 双重关闭绑定，避免空目录响应时误触发
+  - 前端 `FileBrowserModal.vue`：`close-on-click-modal` 改为 `false`，避免点遮罩关闭
+  - 前端 `useFileList.ts`：401/错误时不再清空 `files`，保留模态框打开状态
+
+- **修复 `data: null` 导致前端 `files.length` 计算异常**
+  - 所有返回切片的后端接口均使用 `make([]T, 0)` 初始化
+  - 前端 `data.data || []` 防御式兜底，确保 `data` 为 null 时也能正常渲染
+
+- 修复文件浏览路径导航时面包屑点击空路径跳转问题
+- 修复 JWT Token 刷新流程：收到 401 先刷新 token，刷新失败后才登出
+
+### 📝 文档更新
+
+- 更新 README.md：完善 Web 功能说明、核心 API 列表、响应格式约定
+- 更新 DEVELOPMENT.md：JWT Token 认证说明、空目录响应格式、401 刷新流程、中文错误提示说明
+
+---
+
 ## [v0.6.0](https://gitee.com/lorock/miaokun-log/releases/v0.6.0) - 2026-06-06
 
 ### 🎉 新增功能

@@ -240,12 +240,15 @@ git commit -m "feat: 新增 xxx 功能"
 | GET | `/health` | 健康检查 | 否 |
 | GET | `/version` | 获取版本信息 | 否 |
 | GET | `/files` | 获取日志文件列表 | 否 |
-| GET | `/files/list` | **获取文件列表（分页+详情）** | API Key |
+| GET | `/files/list` | **获取文件列表（分页+详情，支持目录导航）** | **JWT Token** |
 | GET | `/paths` | 获取可用路径配置 | 否 |
-| POST | `/search` | 同步搜索 | 否 |
-| POST | `/search/stream` | SSE 流式搜索 | 否 |
-| POST | `/trace` | TraceId 追踪 | 否 |
-| POST | `/stats` | 日志统计 | 否 |
+| POST | `/auth/login` | **用户登录（返回 JWT Token）** | 否 |
+| POST | `/auth/refresh` | **刷新 Token** | Refresh Token |
+| POST | `/auth/logout` | **用户登出** | JWT Token |
+| POST | `/search` | 同步搜索 | JWT Token |
+| POST | `/search/stream` | SSE 流式搜索 | JWT Token |
+| POST | `/trace` | TraceId 追踪 | JWT Token |
+| POST | `/stats` | 日志统计 | JWT Token |
 
 ### 接口详情
 
@@ -288,9 +291,9 @@ git commit -m "feat: 新增 xxx 功能"
 
 #### GET /api/v1/files/list
 
-**功能**: 获取指定目录下的文件列表，支持分页、时间过滤和详细文件信息。
+**功能**: 获取指定目录下的文件列表，支持分页、时间过滤和详细文件信息。默认路径为 `/`，支持目录导航和面包屑返回。
 
-**认证方式**: API Key (Header: `X-API-Key` 或 Query: `api_key`)
+**认证方式**: JWT Token (Header: `Authorization: Bearer <token>`)
 
 **请求参数**:
 
@@ -303,15 +306,16 @@ git commit -m "feat: 新增 xxx 功能"
 
 **请求示例**:
 ```bash
-# 使用 API Key (Header)
-curl -H "X-API-Key: your-api-key" \
+# 使用 JWT Token 认证
+curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
   "http://localhost:9528/api/v1/files/list?path=/var/log&page=1&page_size=20"
 
-# 使用 API Key (Query)
-curl "http://localhost:9528/api/v1/files/list?path=/var/log&api_key=your-api-key"
+# 浏览空目录（返回 data: []，非 null）
+curl -H "Authorization: Bearer <token>" \
+  "http://localhost:9528/api/v1/files/list?path=/var/log/empty-folder"
 ```
 
-**成功响应** (200 OK):
+**成功响应** (200 OK) - 有数据:
 ```json
 {
   "success": true,
@@ -340,27 +344,54 @@ curl "http://localhost:9528/api/v1/files/list?path=/var/log&api_key=your-api-key
 }
 ```
 
+**成功响应** (200 OK) - 空目录（关键：`data: []` 非 `null`）:
+```json
+{
+  "success": true,
+  "data": [],
+  "pagination": {
+    "page": 1,
+    "page_size": 50,
+    "total": 0,
+    "total_pages": 1,
+    "has_next": false,
+    "has_prev": false
+  }
+}
+```
+
 **错误响应**:
 
-**401 Unauthorized** - 缺少或无效的 API Key:
+**401 Unauthorized** - 缺少或无效的 JWT Token（中文提示）:
 ```json
 {
   "success": false,
   "error": {
-    "code": "MISSING_API_KEY",
-    "message": "API key required",
+    "code": "AUTHENTICATION_REQUIRED",
+    "message": "请先登录后再操作",
     "details": ""
   }
 }
 ```
 
-**403 Forbidden** - 路径不在允许列表中:
+**401 Unauthorized** - Token 已过期:
+```json
+{
+  "success": false,
+  "error": {
+    "code": "TOKEN_EXPIRED",
+    "message": "登录已过期，请重新登录"
+  }
+}
+```
+
+**403 Forbidden** - 路径不在允许列表中（中文提示）:
 ```json
 {
   "success": false,
   "error": {
     "code": "PATH_NOT_ALLOWED",
-    "message": "Access to the requested path is not allowed",
+    "message": "您没有访问该路径的权限",
     "details": "Path '/etc' is not in the allowed paths list"
   }
 }
@@ -372,7 +403,7 @@ curl "http://localhost:9528/api/v1/files/list?path=/var/log&api_key=your-api-key
   "success": false,
   "error": {
     "code": "PATH_NOT_FOUND",
-    "message": "The requested path does not exist",
+    "message": "请求的路径不存在",
     "details": "/var/log/nonexistent"
   }
 }
@@ -384,7 +415,7 @@ curl "http://localhost:9528/api/v1/files/list?path=/var/log&api_key=your-api-key
   "success": false,
   "error": {
     "code": "INVALID_REQUEST",
-    "message": "Failed to parse request parameters",
+    "message": "请求参数错误",
     "details": "invalid page number: abc"
   }
 }
@@ -394,7 +425,9 @@ curl "http://localhost:9528/api/v1/files/list?path=/var/log&api_key=your-api-key
 - **路径遍历防护**: 自动过滤 `..` 等路径遍历序列
 - **敏感目录过滤**: 自动过滤系统敏感目录（`/etc`, `/proc`, `/sys`, `/root` 等）
 - **动态权限检查**: 根据运行用户动态允许访问 `/root` 目录（root 用户可见）
-- **认证中间件**: 支持 API Key 认证（可扩展为 Basic Auth）
+- **认证中间件**: 支持 JWT Token 认证（所有写操作和敏感读操作）
+- **中文错误提示**: 所有错误响应 `message` 字段均为中文（如"请先登录后再操作"）
+- **响应格式约束**: `data` 字段永远不会是 `null`，空数据返回 `[]`，避免前端 `v-if` 异常
 - **常量时间比较**: 防止时序攻击
 
 #### POST /api/v1/search/stream (SSE)
@@ -456,17 +489,28 @@ API 返回错误时，响应体包含 `error` 对象：
 
 ### 401 未认证错误处理
 
-当前端收到 401 响应时，应：
-1. 显示错误提示（"请先登录后再操作"）
-2. 自动清除本地认证状态（localStorage）
-3. 跳转到登录页面
+当前端收到 401 响应时，应遵循以下流程（而非直接登出）：
+
+1. **尝试刷新 Token**（`POST /api/v1/auth/refresh`）
+   - 如果刷新成功：用新 token 重试原请求
+   - 如果刷新失败：才进入登出流程
+
+2. **显示中文错误提示**（"请先登录后再操作"）
+
+3. **自动清除本地认证状态**（localStorage）并跳转到登录页
 
 ```typescript
-// 前端示例：401 响应处理
+// 前端推荐实现：
 if (response.status === 401) {
+  // 先尝试刷新 token
+  const refreshSuccess = await refreshToken();
+  if (refreshSuccess) {
+    // 用新 token 重试原请求
+    return fetchWithToken(originalRequest);
+  }
+  // 刷新失败，才登出
   const data = await response.json();
-  ElMessage.error(data.error.message || '请先登录后再操作');
-  // 清除认证状态并跳转登录页
+  ElMessage.error(data.error?.message || '请先登录后再操作');
   logout();
   router.push('/login');
 }
@@ -605,11 +649,48 @@ mk serve --port 8080
 
 ### API 认证机制
 
-#### API Key 认证
+#### JWT Token 认证
 
-`/api/v1/files/list` 端点使用 API Key 认证：
+系统默认使用 **JWT (JSON Web Token)** 认证。所有需要登录的接口（`/files/list`、`/search/stream`、`/trace`、`/stats` 等）都需要传递有效的 JWT Token。
 
-**配置方式** (在代码中设置):
+**登录获取 Token**：
+```json
+// POST /api/v1/auth/login
+// 请求体
+{
+  "username": "admin",
+  "password": "your-password"
+}
+
+// 响应
+{
+  "success": true,
+  "data": {
+    "access_token": "eyJhbGciOiJIUzI1NiIs...",
+    "refresh_token": "eyJhbGciOiJIUzI1NiIs...",
+    "token_type": "Bearer",
+    "expires_in": 3600
+  }
+}
+```
+
+**使用 Token 访问接口**：
+```bash
+curl -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..." \
+  "http://localhost:9528/api/v1/files/list?path=/var/log"
+```
+
+**Token 自动刷新**：
+- 当前端请求收到 `401` 响应时，`useAuth` 中间件会先尝试刷新 Token
+- 刷新成功后自动重试原请求（用户无感）
+- 刷新失败后才登出并提示用户重新登录
+- `expires_at` 以毫秒为单位（注意后端返回秒需 ×1000）
+
+#### API Key 认证（可选）
+
+`/api/v1/files/list` 等接口同时支持 API Key 认证（用于脚本或自动化场景）：
+
+**配置方式**（在代码中设置）：
 ```go
 authConfig := server.AuthConfig{
     Enabled:  true,
@@ -621,7 +702,7 @@ authConfig := server.AuthConfig{
 apiKeys := []string{"your-secret-api-key"}
 ```
 
-**使用方式**:
+**使用方式**：
 ```bash
 # Header 方式
 curl -H "X-API-Key: your-secret-api-key" \
@@ -629,13 +710,6 @@ curl -H "X-API-Key: your-secret-api-key" \
 
 # Query 参数方式
 curl "http://localhost:9528/api/v1/files/list?api_key=your-secret-api-key"
-```
-
-#### Basic Auth 认证
-
-```bash
-curl -u username:password \
-  "http://localhost:9528/api/v1/files/list"
 ```
 
 ### 路径安全
@@ -676,12 +750,23 @@ curl "http://localhost:9528/api/v1/files/list?path=/var/log"
 ```bash
 # 测试无认证访问
 curl "http://localhost:9528/api/v1/files/list"
-# 预期: 401 Unauthorized
+# 预期: 401 Unauthorized, code: "AUTHENTICATION_REQUIRED", message: "请先登录后再操作"
 
-# 测试错误认证
-curl -H "X-API-Key: wrong-key" \
+# 测试错误 Token
+curl -H "Authorization: Bearer wrong-token" \
   "http://localhost:9528/api/v1/files/list"
 # 预期: 401 Unauthorized
+
+# 先登录获取 token，再测试文件浏览
+curl -X POST http://localhost:9528/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "password"}'
+# 预期: 200 OK, 返回 access_token
+
+# 使用 access_token 浏览文件
+curl -H "Authorization: Bearer <access_token>" \
+  "http://localhost:9528/api/v1/files/list?path=/var/log"
+# 预期: 200 OK
 ```
 
 ### 生产环境安全建议
@@ -706,6 +791,6 @@ curl -H "X-API-Key: wrong-key" \
 
 ---
 
-**文档版本**: v0.3  
+**文档版本**: v0.6.1  
 **最后更新**: 2026-06-06  
 **作者**: 喵坤开发团队

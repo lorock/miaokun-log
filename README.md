@@ -140,11 +140,14 @@ mk serve -vv                    # 调试模式
 - 按日志级别一键过滤
 - 精确时间范围筛选与多目录切换
 - TraceId 跨文件全链路追踪
-- 搜索结果自动高亮
-- 文件浏览功能（支持目录导航）
-- 关键词高亮显示
-- 上下文行显示/隐藏控制
-- 虚拟滚动优化（支持大结果集）
+- 搜索结果自动高亮（关键词紫色高亮）
+- 文件浏览功能（支持目录导航，面包屑路径返回）
+- 上下文行显示/隐藏控制（默认前 3 / 后 5，仅限关键词所在文件）
+- 虚拟滚动优化（支持大结果集，避免内存溢出）
+- 「滚动到最新」悬浮按钮，快速定位最新日志
+- 登录认证（JWT Token，自动刷新，401 中文友好提示）
+- 空目录友好提示（非空模态框消失）
+- 搜索结果内存溢出防护（上限 50000 条，超限自动丢弃最早部分）
 
 **核心 API**  
 
@@ -152,12 +155,19 @@ mk serve -vv                    # 调试模式
 |------|------|
 | GET /api/v1/health | 健康检查 |
 | GET /api/v1/files | 获取日志文件列表 |
-| GET /api/v1/files/list | 文件浏览（支持目录导航） |
+| GET /api/v1/files/list | **文件浏览（支持目录导航 + 分页，空目录返回 data: []）** |
+| POST /api/v1/auth/login | 用户登录（返回 JWT Token） |
+| POST /api/v1/auth/refresh | 刷新 Token（401 自动刷新失败后才登出） |
+| POST /api/v1/auth/logout | 用户登出 |
 | POST /api/v1/search/stream | SSE 流式搜索 |
 | POST /api/v1/trace | TraceId 全链路追踪 |
 | POST /api/v1/stats | 日志级别与文件分布统计 |
-| POST /api/v1/login | 用户登录 |
-| POST /api/v1/refresh | 刷新 Token |
+
+**API 响应格式约定**  
+- 成功: `{ "success": true, "data": [...], "pagination": {...} }`
+- 失败: `{ "success": false, "error": { "code": "ERROR_CODE", "message": "中文错误描述" } }`
+- **重要**: `data` 字段为空时返回 `[]`（空数组），**绝不返回 `null`**，避免前端 `v-if` 条件判断异常
+- 所有错误信息均为**中文**（如「请先登录后再操作」、「您没有执行此操作的权限」等）
 
 ### search - 日志搜索（别名：grep）
 
@@ -224,20 +234,20 @@ cache_dir: /tmp/miaokun-cache
 miaokun-log/
 ├── cmd/mk/                    # 主程序入口
 ├── internal/                  # 核心业务逻辑
-│   ├── auth/                 # 认证相关功能
+│   ├── auth/                 # 认证相关功能（JWT 中间件、中文错误提示）
 │   ├── config/               # 配置管理
 │   ├── discover/             # 日志文件发现
 │   ├── cache/                # 压缩文件缓存
-│   ├── searcher/             # 流式搜索核心
-│   ├── server/               # HTTP 服务器
+│   ├── searcher/             # 流式搜索核心（上下文行隔离到所在文件）
+│   ├── server/               # HTTP 服务器（文件浏览 API、响应体 data: [] 而非 null）
 │   ├── timefilter/           # 时间过滤
 │   └── trace/                # TraceId 链路追踪
 ├── pkg/types/                 # 公共类型定义
 ├── web/                      # 前端代码
 │   ├── src/
-│   │   ├── components/       # Vue 组件
-│   │   ├── composables/      # 组合式函数
-│   │   └── types/           # TypeScript 类型
+│   │   ├── components/       # Vue 组件（FileBrowserModal、LogList、SearchForm 等）
+│   │   ├── composables/      # 组合式函数（useAuth、useLogStream、useFileList）
+│   │   └── types/           # TypeScript 类型（auth.ts、index.ts）
 │   └── dist/                 # 构建产物
 ├── scripts/                   # 安装脚本
 └── Makefile                  # 编译构建规则
