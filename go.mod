@@ -3,9 +3,11 @@ module gitee.com/lorock/miaokun-log
 go 1.25.9
 
 require (
+	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/itchyny/gojq v0.12.19
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
+	golang.org/x/crypto v0.52.0
 )
 
 require (

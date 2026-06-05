@@ -6,7 +6,7 @@
 .PHONY: build-windows-amd64 build-windows-arm64
 
 BINARY=mk
-VERSION=0.5.1
+VERSION=0.6.0
 BUILD_DIR=bin
 WEB_DIR=web
 EMBED_DIR=internal/server/web/dist

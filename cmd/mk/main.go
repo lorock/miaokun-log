@@ -6,6 +6,7 @@ import (
 	"runtime"
 	"strings"
 
+	"gitee.com/lorock/miaokun-log/internal/auth"
 	"gitee.com/lorock/miaokun-log/internal/config"
 	"gitee.com/lorock/miaokun-log/internal/discover"
 	"gitee.com/lorock/miaokun-log/internal/output"
@@ -43,6 +44,9 @@ var (
 	servePort       string
 	webDir          string
 	serveVerbose    int
+	authEnabled     bool
+	authJWTSecret   string
+	adminPassword   string
 )
 
 func printBanner() {
@@ -295,6 +299,9 @@ func main() {
 	serveCmd.Flags().StringVar(&servePort, "port", "9528", "服务端口")
 	serveCmd.Flags().StringVar(&webDir, "web-dir", "./web/dist", "前端静态资源目录")
 	serveCmd.Flags().CountVarP(&serveVerbose, "verbose", "v", "增加日志详细程度 (-v 显示请求/响应, -vv 显示调试详情)")
+	serveCmd.Flags().BoolVar(&authEnabled, "auth", true, "启用认证系统")
+	serveCmd.Flags().StringVar(&authJWTSecret, "jwt-secret", "", "JWT密钥 (至少32字符，启用认证时推荐显式配置)")
+	serveCmd.Flags().StringVar(&adminPassword, "admin-password", "", "管理员密码 (未提供时自动生成随机密码)")
 
 	rootCmd.AddCommand(searchCmd)
 	rootCmd.AddCommand(traceCmd)
@@ -562,6 +569,16 @@ func runStats(cmd *cobra.Command, args []string) error {
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
-	s := server.New(servePort, webDir, cfgFile, serveVerbose)
+	// Issue3: Validate configuration when auth is enabled
+	if authEnabled && authJWTSecret != "" && len(authJWTSecret) < 32 {
+		return fmt.Errorf("--jwt-secret 长度不足 32 字符，HMAC-SHA256 需要足够强度的密钥")
+	}
+
+	authCfg := &auth.AuthConfig{
+		Enabled:         authEnabled,
+		JWTSecret:       authJWTSecret,
+		DefaultPassword: adminPassword,
+	}
+	s := server.New(servePort, webDir, cfgFile, serveVerbose, authCfg)
 	return s.Start()
 }

@@ -1,51 +1,8 @@
-import { ref } from 'vue';
+import { ref, computed } from 'vue';
 import type { LogMatch, LogStats, SearchRequest } from '../types';
 
-export class RingBuffer<T> {
-  private buffer: (T | null)[];
-  private start = 0;
-  private count = 0;
-
-  constructor(public readonly capacity: number = 50000) {
-    this.buffer = new Array(capacity).fill(null);
-  }
-
-  append(item: T): void {
-    const idx = (this.start + this.count) % this.capacity;
-    this.buffer[idx] = item;
-    if (this.count < this.capacity) {
-      this.count++;
-    } else {
-      this.start = (this.start + 1) % this.capacity;
-    }
-  }
-
-  get(index: number): T | null {
-    if (index < 0 || index >= this.count) return null;
-    return this.buffer[(this.start + index) % this.capacity];
-  }
-
-  size(): number {
-    return this.count;
-  }
-
-  toArray(): T[] {
-    const result: T[] = [];
-    for (let i = 0; i < this.count; i++) {
-      const item = this.get(i);
-      if (item !== null) {
-        result.push(item);
-      }
-    }
-    return result;
-  }
-
-  clear(): void {
-    this.start = 0;
-    this.count = 0;
-    this.buffer.fill(null);
-  }
-}
+const MAX_LOGS = 50000;
+const UPDATE_INTERVAL = 100;
 
 function extractLevel(line: string): string {
   const upper = line.toUpperCase();
@@ -67,18 +24,42 @@ export function useLogStream() {
     total_files: 0,
   });
   const error = ref<string | null>(null);
-  const buffer = new RingBuffer<LogMatch>(50000);
+  const reachedLimit = ref(false);
+  
   let abortController: AbortController | null = null;
+  let pendingLogs: LogMatch[] = [];
+  let updateTimer: ReturnType<typeof setTimeout> | null = null;
+  let totalReceived = 0;
+
+  const flushPendingLogs = () => {
+    if (pendingLogs.length === 0) return;
+    
+    const newLogs = pendingLogs;
+    pendingLogs = [];
+    
+    if (logs.value.length + newLogs.length > MAX_LOGS) {
+      const overflow = logs.value.length + newLogs.length - MAX_LOGS;
+      logs.value = logs.value.slice(overflow);
+      reachedLimit.value = true;
+    }
+    
+    logs.value = [...logs.value, ...newLogs];
+  };
 
   const start = async (request: SearchRequest) => {
     stop();
-    buffer.clear();
+    
     logs.value = [];
+    pendingLogs = [];
+    totalReceived = 0;
     stats.value = { total: 0, by_level: {}, total_files: 0 };
     error.value = null;
+    reachedLimit.value = false;
     isStreaming.value = true;
 
     abortController = new AbortController();
+    
+    updateTimer = setInterval(flushPendingLogs, UPDATE_INTERVAL);
 
     try {
       const response = await fetch('/api/v1/search/stream', {
@@ -91,14 +72,28 @@ export function useLogStream() {
       });
 
       if (!response.ok) {
-        error.value = `请求失败: ${response.status}`;
+        if (response.status === 401) {
+          error.value = '登录已过期，请重新登录后再搜索';
+        } else if (response.status === 403) {
+          error.value = '没有权限访问该资源';
+        } else {
+          error.value = `请求失败 (${response.status})，请重试`;
+        }
         isStreaming.value = false;
+        if (updateTimer) {
+          clearInterval(updateTimer);
+          updateTimer = null;
+        }
         return;
       }
 
       if (!response.body) {
         error.value = '响应体为空';
         isStreaming.value = false;
+        if (updateTimer) {
+          clearInterval(updateTimer);
+          updateTimer = null;
+        }
         return;
       }
 
@@ -126,8 +121,8 @@ export function useLogStream() {
 
               if (data.type === 'match') {
                 const match = data.data as LogMatch;
-                buffer.append(match);
-                logs.value = buffer.toArray();
+                pendingLogs.push(match);
+                totalReceived++;
                 stats.value.total++;
                 const level = extractLevel(match.raw);
                 if (!stats.value.by_level[level]) {
@@ -146,10 +141,20 @@ export function useLogStream() {
         }
       }
 
+      flushPendingLogs();
+      if (updateTimer) {
+        clearInterval(updateTimer);
+        updateTimer = null;
+      }
       isStreaming.value = false;
     } catch (err) {
       if (err instanceof Error && err.name !== 'AbortError') {
         error.value = err.message;
+      }
+      flushPendingLogs();
+      if (updateTimer) {
+        clearInterval(updateTimer);
+        updateTimer = null;
       }
       isStreaming.value = false;
     }
@@ -160,23 +165,39 @@ export function useLogStream() {
       abortController.abort();
       abortController = null;
     }
+    if (updateTimer) {
+      clearInterval(updateTimer);
+      updateTimer = null;
+    }
+    flushPendingLogs();
     isStreaming.value = false;
   };
 
   const clear = () => {
-    buffer.clear();
     logs.value = [];
+    pendingLogs = [];
+    totalReceived = 0;
     stats.value = { total: 0, by_level: {}, total_files: 0 };
     error.value = null;
+    reachedLimit.value = false;
   };
+
+  const displayTotal = computed(() => totalReceived);
+  const displayCount = computed(() => logs.value.length);
+  const isOverLimit = computed(() => reachedLimit.value);
 
   return {
     logs,
     stats,
     isStreaming,
     error,
+    reachedLimit,
+    displayTotal,
+    displayCount,
+    isOverLimit,
     start,
     stop,
     clear,
+    MAX_LOGS,
   };
 }

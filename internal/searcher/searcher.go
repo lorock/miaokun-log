@@ -56,7 +56,7 @@ func (s *Searcher) BuildArgs(opts types.SearchOptions) []string {
 
 	args = append(args, opts.Pattern)
 	args = append(args, opts.Paths...)
-	
+
 	return args
 }
 
@@ -67,22 +67,22 @@ func (s *Searcher) Search(ctx context.Context, opts types.SearchOptions) ([]type
 
 	args := s.BuildArgs(opts)
 	var matches []types.LogMatch
-	
+
 	err := s.SearchStream(ctx, args, opts, func(m types.LogMatch) bool {
 		matches = append(matches, m)
 		return true
 	})
-	
+
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return matches, nil
 }
 
 func (s *Searcher) SearchStream(ctx context.Context, args []string, opts types.SearchOptions, callback func(types.LogMatch) bool) error {
 	cmd := exec.CommandContext(ctx, s.RGPath, args...)
-	
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("创建 stdout pipe 失败: %w", err)
@@ -195,7 +195,7 @@ func (s *Searcher) SearchStream(ctx context.Context, args []string, opts types.S
 			continue
 		}
 
-		if hasContext && parsed.isContext {
+		if hasContext && parsed.isContext && !parsed.isMatch {
 			if currentMatch != nil {
 				// 这是 after context
 				currentMatch.AfterContext = append(currentMatch.AfterContext, parsed.content)
@@ -251,7 +251,7 @@ type parsedResult struct {
 
 func parseLine(line string, matchLineRegex, contextLineRegex *regexp.Regexp) parsedResult {
 	res := parsedResult{}
-	
+
 	// 尝试匹配行
 	if matchGroups := matchLineRegex.FindStringSubmatch(line); len(matchGroups) == 4 {
 		if lineNum, err := strconv.Atoi(matchGroups[2]); err == nil && lineNum > 0 {
@@ -261,7 +261,7 @@ func parseLine(line string, matchLineRegex, contextLineRegex *regexp.Regexp) par
 			res.content = matchGroups[3]
 		}
 	}
-	
+
 	// 尝试上下文行，只有不是匹配行的时候才设置 res.content
 	if ctxGroups := contextLineRegex.FindStringSubmatch(line); len(ctxGroups) == 4 {
 		if lineNum, err := strconv.Atoi(ctxGroups[2]); err == nil && lineNum > 0 {
@@ -275,19 +275,19 @@ func parseLine(line string, matchLineRegex, contextLineRegex *regexp.Regexp) par
 			}
 		}
 	}
-	
+
 	return res
 }
 
 func ParseOutput(output string, hasContext bool) []types.LogMatch {
 	var matches []types.LogMatch
 	lines := strings.Split(strings.TrimSpace(output), "\n")
-	
+
 	// 正则表达式：匹配行格式 file:line:content（文件名不含冒号）
 	matchLineRegex := regexp.MustCompile(`^([^:]+):(\d+):(.*)$`)
 	// 正则表达式：上下文行格式 file-line-content
 	contextLineRegex := regexp.MustCompile(`^(.+?)-(\d+)-(.*)$`)
-	
+
 	type MatchInternal struct {
 		File          string
 		LineNum       int
@@ -297,12 +297,12 @@ func ParseOutput(output string, hasContext bool) []types.LogMatch {
 	}
 	var currentMatch *MatchInternal
 	var beforeLines []string
-	
+
 	for _, line := range lines {
 		if line == "" {
 			continue
 		}
-		
+
 		// ripgrep 用 -- 分隔不同匹配
 		if line == "--" {
 			if currentMatch != nil {
@@ -320,9 +320,9 @@ func ParseOutput(output string, hasContext bool) []types.LogMatch {
 			beforeLines = []string{}
 			continue
 		}
-		
+
 		parsed := parseLine(line, matchLineRegex, contextLineRegex)
-		
+
 		// 决策逻辑：优先匹配行
 		if parsed.isMatch {
 			if currentMatch != nil {
@@ -347,9 +347,9 @@ func ParseOutput(output string, hasContext bool) []types.LogMatch {
 			beforeLines = []string{}
 			continue
 		}
-		
-		// 检查是不是上下文行
-		if hasContext && parsed.isContext {
+
+		// 检查是不是上下文行（只有不是匹配行时才是真正的上下文行）
+		if hasContext && parsed.isContext && !parsed.isMatch {
 			if currentMatch != nil {
 				currentMatch.AfterContext = append(currentMatch.AfterContext, parsed.content)
 			} else {
@@ -357,7 +357,7 @@ func ParseOutput(output string, hasContext bool) []types.LogMatch {
 			}
 		}
 	}
-	
+
 	// 最后一个匹配
 	if currentMatch != nil {
 		m := types.LogMatch{
@@ -370,6 +370,6 @@ func ParseOutput(output string, hasContext bool) []types.LogMatch {
 		}
 		matches = append(matches, m)
 	}
-	
+
 	return matches
 }

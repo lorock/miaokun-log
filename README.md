@@ -141,6 +141,10 @@ mk serve -vv                    # 调试模式
 - 精确时间范围筛选与多目录切换
 - TraceId 跨文件全链路追踪
 - 搜索结果自动高亮
+- 文件浏览功能（支持目录导航）
+- 关键词高亮显示
+- 上下文行显示/隐藏控制
+- 虚拟滚动优化（支持大结果集）
 
 **核心 API**  
 
@@ -148,9 +152,12 @@ mk serve -vv                    # 调试模式
 |------|------|
 | GET /api/v1/health | 健康检查 |
 | GET /api/v1/files | 获取日志文件列表 |
+| GET /api/v1/files/list | 文件浏览（支持目录导航） |
 | POST /api/v1/search/stream | SSE 流式搜索 |
 | POST /api/v1/trace | TraceId 全链路追踪 |
 | POST /api/v1/stats | 日志级别与文件分布统计 |
+| POST /api/v1/login | 用户登录 |
+| POST /api/v1/refresh | 刷新 Token |
 
 ### search - 日志搜索（别名：grep）
 
@@ -217,16 +224,23 @@ cache_dir: /tmp/miaokun-cache
 miaokun-log/
 ├── cmd/mk/                    # 主程序入口
 ├── internal/                  # 核心业务逻辑
-│   ├── config/                # 配置管理
-│   ├── discover/              # 日志文件发现
-│   ├── cache/                 # 压缩文件缓存
-│   ├── searcher/              # 流式搜索核心
-│   ├── trace/                 # TraceId 链路追踪
-│   ├── timefilter/            # 时间过滤
-│   └── output/                # 输出格式化
+│   ├── auth/                 # 认证相关功能
+│   ├── config/               # 配置管理
+│   ├── discover/             # 日志文件发现
+│   ├── cache/                # 压缩文件缓存
+│   ├── searcher/             # 流式搜索核心
+│   ├── server/               # HTTP 服务器
+│   ├── timefilter/           # 时间过滤
+│   └── trace/                # TraceId 链路追踪
 ├── pkg/types/                 # 公共类型定义
-├── scripts/                   # 安装与构建脚本
-└── Makefile                   # 编译构建规则
+├── web/                      # 前端代码
+│   ├── src/
+│   │   ├── components/       # Vue 组件
+│   │   ├── composables/      # 组合式函数
+│   │   └── types/           # TypeScript 类型
+│   └── dist/                 # 构建产物
+├── scripts/                   # 安装脚本
+└── Makefile                  # 编译构建规则
 ```
 
 ---

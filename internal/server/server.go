@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"gitee.com/lorock/miaokun-log/internal/auth"
 	"gitee.com/lorock/miaokun-log/internal/config"
 	"gitee.com/lorock/miaokun-log/internal/discover"
 	"gitee.com/lorock/miaokun-log/internal/searcher"
@@ -17,6 +18,247 @@ import (
 	"gitee.com/lorock/miaokun-log/pkg/types"
 	"gitee.com/lorock/miaokun-log/pkg/version"
 )
+
+var logLevel int
+
+// Server holds the HTTP server
+type Server struct {
+	port      string
+	webDir    string
+	cfgFile   string
+	verbose   int
+	authCfg   *auth.AuthConfig
+	jwtMgr    *auth.JWTManager
+	apiKeyMgr *auth.APIKeyManager
+	userStore *auth.UserStore
+	authMware *auth.JWTAuthMiddleware
+}
+
+// New creates a new server
+func New(port, webDir, cfgFile string, verbose int, authCfg *auth.AuthConfig) *Server {
+	return &Server{
+		port:    port,
+		webDir:  webDir,
+		cfgFile: cfgFile,
+		verbose: verbose,
+		authCfg: authCfg,
+	}
+}
+
+// InitializeAuth initializes authentication components
+func (s *Server) InitializeAuth() error {
+	if s.authCfg == nil || !s.authCfg.Enabled {
+		return nil
+	}
+
+	// Issue3: Validate JWT secret — if empty, generate a random secret at startup
+	// instead of using a hardcoded fallback value.
+	if s.authCfg.JWTSecret == "" {
+		randomSecret, err := auth.GenerateRandomSecret(32)
+		if err != nil {
+			return fmt.Errorf("failed to generate JWT secret: %w", err)
+		}
+		s.authCfg.JWTSecret = randomSecret
+		fmt.Printf("  ⚠️  警告: 未提供 --jwt-secret，已自动生成随机 JWT 密钥\n")
+		fmt.Printf("     本次会话密钥: %s\n", randomSecret)
+		fmt.Printf("     生产部署请显式配置: --jwt-secret <至少32字符随机字符串>\n")
+	}
+	if len(s.authCfg.JWTSecret) < 16 {
+		return fmt.Errorf("JWT secret 长度不足 16 字符，安全性不足")
+	}
+
+	if s.authCfg.AccessTokenTTL == 0 {
+		s.authCfg.AccessTokenTTL = 24 * time.Hour
+	}
+	if s.authCfg.RefreshTokenTTL == 0 {
+		s.authCfg.RefreshTokenTTL = 7 * 24 * time.Hour
+	}
+
+	jwtMgr, err := auth.NewJWTManager(s.authCfg.JWTSecret, s.authCfg.AccessTokenTTL, s.authCfg.RefreshTokenTTL)
+	if err != nil {
+		return fmt.Errorf("failed to create JWT manager: %w", err)
+	}
+	s.jwtMgr = jwtMgr
+
+	// Initialize API Key Manager
+	s.apiKeyMgr = auth.NewAPIKeyManager()
+
+	// Initialize User Store with random admin password by default
+	// Issue1: No more hardcoded "admin123". Generate random password if not provided.
+	var adminPassword string
+	s.userStore, adminPassword = auth.NewUserStore(s.authCfg.DefaultPassword)
+
+	if len(s.authCfg.APIKeys) > 0 {
+		for _, key := range s.authCfg.APIKeys {
+			if key != "" {
+				_, _ = s.apiKeyMgr.GenerateAPIKey("system", key, 0)
+			}
+		}
+	}
+
+	// Print admin credential info for operator
+	fmt.Printf("  🔑 默认管理员账号: admin / %s\n", adminPassword)
+	if s.authCfg.DefaultPassword == "" {
+		fmt.Printf("     提示: 建议通过 --admin-password <自定义密码> 显式设置管理员密码\n")
+	}
+
+	// Initialize auth middleware
+	s.authMware = auth.NewJWTAuthMiddleware(s.jwtMgr, s.apiKeyMgr)
+
+	return nil
+}
+
+func (s *Server) Start() error {
+	// Initialize auth if not already done
+	if s.authMware == nil {
+		if err := s.InitializeAuth(); err != nil {
+			return err
+		}
+	}
+
+	logLevel = s.verbose
+	mux := http.NewServeMux()
+
+	// Public endpoints (no authentication required)
+	mux.HandleFunc("/api/v1/health", loggingMiddleware("health", handleHealth))
+	mux.HandleFunc("/api/v1/version", loggingMiddleware("version", handleVersion))
+
+	// Auth endpoints (no authentication required)
+	if s.authMware != nil {
+		authHandler := auth.NewAuthHandler(s.jwtMgr, s.userStore)
+		mux.HandleFunc("/api/v1/auth/login", loggingMiddleware("auth-login", authHandler.Login))
+		mux.HandleFunc("/api/v1/auth/refresh", loggingMiddleware("auth-refresh", authHandler.Refresh))
+		mux.HandleFunc("/api/v1/auth/logout", loggingMiddleware("auth-logout", authHandler.Logout))
+	}
+
+	// Protected endpoints (authentication required)
+	if s.authMware != nil {
+		authHandler := auth.NewAuthHandler(s.jwtMgr, s.userStore)
+
+		// User endpoints
+		userHandler := authMiddleware(authHandler.GetCurrentUser, s.authMware.Authenticate())
+		mux.HandleFunc("/api/v1/auth/me", loggingMiddleware("auth-me", userHandler))
+
+		adminHandler := authMiddleware(authHandler.ListUsers,
+			s.authMware.Authenticate(),
+			s.authMware.RequireRole(auth.RoleAdmin))
+		mux.HandleFunc("/api/v1/auth/users", loggingMiddleware("auth-users", adminHandler))
+
+		// Protected API endpoints with permission checks
+		protected := s.authMware.Authenticate()
+
+		// File browsing requires file_browse permission
+		filesHandler := authMiddleware(handleFiles, protected, s.authMware.RequirePermission(auth.PermFileBrowse))
+		mux.HandleFunc("/api/v1/files", loggingMiddleware("files", filesHandler))
+
+		// File list requires file_read permission
+		fileListHandler := authMiddleware(handleFileList, protected, s.authMware.RequirePermission(auth.PermFileRead))
+		mux.HandleFunc("/api/v1/files/list", loggingMiddleware("files-list", fileListHandler))
+
+		// Paths discovery requires file_browse permission
+		pathsHandler := authMiddleware(handlePaths(s.cfgFile), protected, s.authMware.RequirePermission(auth.PermFileBrowse))
+		mux.HandleFunc("/api/v1/paths", loggingMiddleware("paths", pathsHandler))
+
+		// Search requires search permission
+		searchHandler := authMiddleware(handleSearch, protected, s.authMware.RequirePermission(auth.PermSearch))
+		mux.HandleFunc("/api/v1/search", loggingMiddleware("search", searchHandler))
+
+		// Stream search requires search permission
+		streamHandler := authMiddleware(handleSearchStream, protected, s.authMware.RequirePermission(auth.PermSearch))
+		mux.HandleFunc("/api/v1/search/stream", loggingMiddleware("search-stream", streamHandler))
+
+		// Stats requires search permission
+		statsHandler := authMiddleware(handleStats, protected, s.authMware.RequirePermission(auth.PermSearch))
+		mux.HandleFunc("/api/v1/stats", loggingMiddleware("stats", statsHandler))
+
+		// Trace requires search permission
+		traceHandler := authMiddleware(handleTrace, protected, s.authMware.RequirePermission(auth.PermSearch))
+		mux.HandleFunc("/api/v1/trace", loggingMiddleware("trace", traceHandler))
+	} else {
+		// No authentication - allow all endpoints
+		mux.HandleFunc("/api/v1/files", loggingMiddleware("files", handleFiles))
+		mux.HandleFunc("/api/v1/files/list", loggingMiddleware("files-list", handleFileList))
+		mux.HandleFunc("/api/v1/paths", loggingMiddleware("paths", handlePaths(s.cfgFile)))
+		mux.HandleFunc("/api/v1/search", loggingMiddleware("search", handleSearch))
+		mux.HandleFunc("/api/v1/search/stream", loggingMiddleware("search-stream", handleSearchStream))
+		mux.HandleFunc("/api/v1/stats", loggingMiddleware("stats", handleStats))
+		mux.HandleFunc("/api/v1/trace", loggingMiddleware("trace", handleTrace))
+	}
+
+	// Static files and SPA
+	mux.HandleFunc("/", loggingMiddleware("static", func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			http.NotFound(w, r)
+			return
+		}
+
+		if r.URL.Path == "/" || r.URL.Path == "" {
+			data, err := webAssets.ReadFile("web/dist/index.html")
+			if err != nil {
+				logAPIError("static", fmt.Sprintf("Failed to load index.html: %v", err))
+				http.Error(w, fmt.Sprintf("Failed to load index.html: %v", err), http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Write(data)
+			return
+		}
+
+		filePath := "web/dist" + r.URL.Path
+		data, err := webAssets.ReadFile(filePath)
+		if err != nil {
+			data, err = webAssets.ReadFile("web/dist/index.html")
+			if err != nil {
+				logAPIError("static", fmt.Sprintf("File not found: %s (%v)", filePath, err))
+				http.Error(w, fmt.Sprintf("File not found: %v", err), http.StatusNotFound)
+				return
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		} else {
+			switch {
+			case strings.HasSuffix(filePath, ".css"):
+				w.Header().Set("Content-Type", "text/css")
+			case strings.HasSuffix(filePath, ".js"):
+				w.Header().Set("Content-Type", "application/javascript")
+			case strings.HasSuffix(filePath, ".html"):
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			}
+		}
+		w.Write(data)
+	}))
+
+	server := &http.Server{
+		Addr:         ":" + s.port,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 300 * time.Second,
+	}
+
+	authStatus := "已禁用"
+	if s.authMware != nil {
+		authStatus = "已启用"
+	}
+
+	fmt.Printf("🐾 喵坤 Web 服务启动\n")
+	fmt.Printf("  📡 服务端口: %s\n", s.port)
+	fmt.Printf("  🌐 访问地址: http://localhost:%s\n", s.port)
+	fmt.Printf("  🔐 认证系统: %s\n", authStatus)
+	if s.verbose >= 1 {
+		fmt.Printf("  📝 API 日志: 已启用 (level=%d)\n", s.verbose)
+	}
+	fmt.Printf("\n")
+
+	return server.ListenAndServe()
+}
+
+// authMiddleware wraps handlers with middleware
+func authMiddleware(handler http.HandlerFunc, middlewares ...func(http.Handler) http.Handler) http.HandlerFunc {
+	var wrapped http.Handler = handler
+	for i := len(middlewares) - 1; i >= 0; i-- {
+		wrapped = middlewares[i](wrapped)
+	}
+	return wrapped.ServeHTTP
+}
 
 type responseWriter struct {
 	http.ResponseWriter
@@ -42,91 +284,6 @@ func (rw *responseWriter) Flush() {
 	if flusher, ok := rw.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
 	}
-}
-
-type Server struct {
-	port    string
-	webDir  string
-	cfgFile string
-	verbose int
-}
-
-func New(port, webDir, cfgFile string, verbose int) *Server {
-	return &Server{port: port, webDir: webDir, cfgFile: cfgFile, verbose: verbose}
-}
-
-var logLevel int
-
-func (s *Server) Start() error {
-	logLevel = s.verbose
-	mux := http.NewServeMux()
-
-	mux.HandleFunc("/api/v1/health", loggingMiddleware("health", handleHealth))
-	mux.HandleFunc("/api/v1/version", loggingMiddleware("version", handleVersion))
-	mux.HandleFunc("/api/v1/files", loggingMiddleware("files", handleFiles))
-	mux.HandleFunc("/api/v1/paths", loggingMiddleware("paths", handlePaths(s.cfgFile)))
-	mux.HandleFunc("/api/v1/search", loggingMiddleware("search", handleSearch))
-	mux.HandleFunc("/api/v1/search/stream", loggingMiddleware("search-stream", handleSearchStream))
-	mux.HandleFunc("/api/v1/stats", loggingMiddleware("stats", handleStats))
-	mux.HandleFunc("/api/v1/trace", loggingMiddleware("trace", handleTrace))
-
-	mux.HandleFunc("/", loggingMiddleware("static", func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") {
-			http.NotFound(w, r)
-			return
-		}
-
-		if r.URL.Path == "/" || r.URL.Path == "" {
-			data, err := webAssets.ReadFile("web/dist/index.html")
-			if err != nil {
-				logAPIError("static", fmt.Sprintf("加载 index.html 失败: %v", err))
-				http.Error(w, fmt.Sprintf("Failed to read index.html: %v", err), http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			w.Write(data)
-			return
-		}
-
-		filePath := "web/dist" + r.URL.Path
-		data, err := webAssets.ReadFile(filePath)
-		if err != nil {
-			data, err = webAssets.ReadFile("web/dist/index.html")
-			if err != nil {
-				logAPIError("static", fmt.Sprintf("文件未找到: %s (%v)", filePath, err))
-				http.Error(w, fmt.Sprintf("File not found: %v", err), http.StatusNotFound)
-				return
-			}
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		} else {
-			switch {
-			case strings.HasSuffix(filePath, ".css"):
-				w.Header().Set("Content-Type", "text/css")
-			case strings.HasSuffix(filePath, ".js"):
-				w.Header().Set("Content-Type", "application/javascript")
-			case strings.HasSuffix(filePath, ".html"):
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			}
-		}
-		w.Write(data)
-	}))
-
-	server := &http.Server{
-		Addr:         ":" + s.port,
-		Handler:      mux,
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 300 * time.Second,
-	}
-
-	fmt.Printf("🐾 喵坤 Web 服务启动\n")
-	fmt.Printf("  📡 服务端口: %s\n", s.port)
-	fmt.Printf("  🌐 访问地址: http://localhost:%s\n", s.port)
-	if s.verbose >= 1 {
-		fmt.Printf("  📝 API 日志: 已启用 (level=%d)\n", s.verbose)
-	}
-	fmt.Printf("\n")
-
-	return server.ListenAndServe()
 }
 
 func loggingMiddleware(apiName string, handler http.HandlerFunc) http.HandlerFunc {
@@ -184,7 +341,7 @@ func formatDuration(d time.Duration) string {
 
 func logAPIRequest(apiName, msg string) {
 	if logLevel >= 1 {
-		fmt.Fprintf(os.Stderr, "[%s] [REQUEST]  %s\n", time.Now().Format("2006-01-02 15:04:05.000"), msg)
+		fmt.Fprintf(os.Stderr, "[%s] [REQUEST]  %s %s\n", time.Now().Format("2006-01-02 15:04:05.000"), apiName, msg)
 	}
 }
 
@@ -237,11 +394,11 @@ func handleFiles(w http.ResponseWriter, r *http.Request) {
 		paths = []string{p}
 	}
 
-	logAPIDetail("files", fmt.Sprintf("参数: since=%.0f, paths=%v", sinceDays, paths))
+	logAPIDetail("files", fmt.Sprintf("Params: since=%.0f, paths=%v", sinceDays, paths))
 
 	if err := config.Load(""); err != nil {
-		logAPIError("files", fmt.Sprintf("加载配置失败: %v", err))
-		http.Error(w, fmt.Sprintf("加载配置失败: %v", err), http.StatusInternalServerError)
+		logAPIError("files", fmt.Sprintf("Config load failed: %v", err))
+		http.Error(w, fmt.Sprintf("Config load failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -249,12 +406,12 @@ func handleFiles(w http.ResponseWriter, r *http.Request) {
 	files, err := discover.FindLogs(paths, sinceDays)
 	discoverDuration := time.Since(start)
 	if err != nil {
-		logAPIError("files", fmt.Sprintf("发现日志文件失败: %v", err))
-		http.Error(w, fmt.Sprintf("发现日志文件失败: %v", err), http.StatusInternalServerError)
+		logAPIError("files", fmt.Sprintf("Find logs failed: %v", err))
+		http.Error(w, fmt.Sprintf("Find logs failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	logAPIInfo("files", fmt.Sprintf("发现 %d 个日志文件 (耗时: %s)", len(files), formatDuration(discoverDuration)))
+	logAPIInfo("files", fmt.Sprintf("Found %d log files (duration: %s)", len(files), formatDuration(discoverDuration)))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -275,11 +432,11 @@ func handlePaths(cfgFile string) http.HandlerFunc {
 			}
 		}
 
-		logAPIDetail("paths", fmt.Sprintf("参数: since=%.0f, cfgFile=%s", sinceDays, cfgFile))
+		logAPIDetail("paths", fmt.Sprintf("Params: since=%.0f, cfgFile=%s", sinceDays, cfgFile))
 
 		if err := config.Load(cfgFile); err != nil {
-			logAPIError("paths", fmt.Sprintf("加载配置失败: %v", err))
-			http.Error(w, fmt.Sprintf("加载配置失败: %v", err), http.StatusInternalServerError)
+			logAPIError("paths", fmt.Sprintf("Config load failed: %v", err))
+			http.Error(w, fmt.Sprintf("Config load failed: %v", err), http.StatusInternalServerError)
 			return
 		}
 
@@ -288,7 +445,7 @@ func handlePaths(cfgFile string) http.HandlerFunc {
 		paths := discover.DiscoverPaths(sinceDays, cfg.DefaultPaths...)
 		discoverDuration := time.Since(start)
 
-		logAPIInfo("paths", fmt.Sprintf("发现 %d 个路径 (耗时: %s)", len(paths), formatDuration(discoverDuration)))
+		logAPIInfo("paths", fmt.Sprintf("Found %d paths (duration: %s)", len(paths), formatDuration(discoverDuration)))
 
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -310,11 +467,11 @@ type SearchRequest struct {
 }
 
 func (r SearchRequest) summary() string {
-	levelStr := "全部"
+	levelStr := "all"
 	if r.Level != "" {
 		levelStr = r.Level
 	}
-	return fmt.Sprintf("pattern=%q, paths=%d, level=%s, case_insensitive=%v, max_count=%d, before=%d, after=%d, since=%.0f天",
+	return fmt.Sprintf("pattern=%q, paths=%d, level=%s, case_insensitive=%v, max_count=%d, before=%d, after=%d, since=%.0fdays",
 		r.Pattern, len(r.Paths), levelStr, r.CaseInsensitive, r.MaxCount, r.Before, r.After, r.SinceDays)
 }
 
@@ -354,7 +511,7 @@ func buildOptsFromRequest(req SearchRequest) (types.SearchOptions, []string, err
 		logPaths[i] = f.Path
 	}
 
-	logAPIDetail("search", fmt.Sprintf("发现 %d 个文件 (耗时: %s)", len(files), formatDuration(discoverDuration)))
+	logAPIDetail("search", fmt.Sprintf("Found %d files (duration: %s)", len(files), formatDuration(discoverDuration)))
 
 	opts := types.SearchOptions{
 		Pattern:         req.Pattern,
@@ -460,44 +617,44 @@ func handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	var req SearchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logAPIError("search", fmt.Sprintf("请求解析失败: %v", err))
-		http.Error(w, fmt.Sprintf("请求解析失败: %v", err), http.StatusBadRequest)
+		logAPIError("search", fmt.Sprintf("Request parse failed: %v", err))
+		http.Error(w, fmt.Sprintf("Request parse failed: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	logAPIDetail("search", fmt.Sprintf("请求参数: %s", req.summary()))
+	logAPIDetail("search", fmt.Sprintf("Request params: %s", req.summary()))
 
 	s := searcher.New()
 	if err := s.CheckRipgrep(); err != nil {
-		logAPIError("search", fmt.Sprintf("ripgrep 检查失败: %v", err))
+		logAPIError("search", fmt.Sprintf("ripgrep check failed: %v", err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	opts, logPaths, err := buildOptsFromRequest(req)
 	if err != nil {
-		logAPIError("search", fmt.Sprintf("构建搜索参数失败: %v", err))
-		http.Error(w, fmt.Sprintf("准备搜索参数失败: %v", err), http.StatusInternalServerError)
+		logAPIError("search", fmt.Sprintf("Build options failed: %v", err))
+		http.Error(w, fmt.Sprintf("Prepare search params failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	logAPIDetail("search", fmt.Sprintf("在 %d 个文件中搜索: %v", len(logPaths), pathsSummary(logPaths)))
+	logAPIDetail("search", fmt.Sprintf("Searching in %d files: %v", len(logPaths), pathsSummary(logPaths)))
 
 	searchStart := time.Now()
 	matches, err := s.Search(r.Context(), opts)
 	searchDuration := time.Since(searchStart)
 	if err != nil {
-		logAPIError("search", fmt.Sprintf("搜索失败: %v", err))
-		http.Error(w, fmt.Sprintf("搜索失败: %v", err), http.StatusInternalServerError)
+		logAPIError("search", fmt.Sprintf("Search failed: %v", err))
+		http.Error(w, fmt.Sprintf("Search failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	logAPIDetail("search", fmt.Sprintf("原始匹配: %d 条 (耗时: %s)", len(matches), formatDuration(searchDuration)))
+	logAPIDetail("search", fmt.Sprintf("Raw matches: %d (duration: %s)", len(matches), formatDuration(searchDuration)))
 
 	matches = applyTimeFilter(matches, opts.From, opts.To)
 	matches = applyLevelFilter(matches, opts.Level)
 
-	logAPIInfo("search", fmt.Sprintf("最终返回: %d 条 (级别过滤: %q, 时间: %s→%s)",
+	logAPIInfo("search", fmt.Sprintf("Final results: %d (level filter: %q, time: %s→%s)",
 		len(matches), opts.Level, formatTime(opts.From), formatTime(opts.To)))
 
 	w.Header().Set("Content-Type", "application/json")
@@ -513,24 +670,24 @@ func handleSearchStream(w http.ResponseWriter, r *http.Request) {
 
 	var req SearchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logAPIError("search-stream", fmt.Sprintf("请求解析失败: %v", err))
-		http.Error(w, fmt.Sprintf("请求解析失败: %v", err), http.StatusBadRequest)
+		logAPIError("search-stream", fmt.Sprintf("Request parse failed: %v", err))
+		http.Error(w, fmt.Sprintf("Request parse failed: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	logAPIDetail("search-stream", fmt.Sprintf("请求参数: %s", req.summary()))
+	logAPIDetail("search-stream", fmt.Sprintf("Request params: %s", req.summary()))
 
 	s := searcher.New()
 	if err := s.CheckRipgrep(); err != nil {
-		logAPIError("search-stream", fmt.Sprintf("ripgrep 检查失败: %v", err))
+		logAPIError("search-stream", fmt.Sprintf("ripgrep check failed: %v", err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	opts, _, err := buildOptsFromRequest(req)
 	if err != nil {
-		logAPIError("search-stream", fmt.Sprintf("构建搜索参数失败: %v", err))
-		http.Error(w, fmt.Sprintf("准备搜索参数失败: %v", err), http.StatusInternalServerError)
+		logAPIError("search-stream", fmt.Sprintf("Build options failed: %v", err))
+		http.Error(w, fmt.Sprintf("Prepare search params failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -541,7 +698,7 @@ func handleSearchStream(w http.ResponseWriter, r *http.Request) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		logAPIError("search-stream", "Streaming 不支持")
+		logAPIError("search-stream", "Streaming not supported")
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
 		return
 	}
@@ -564,19 +721,19 @@ func handleSearchStream(w http.ResponseWriter, r *http.Request) {
 	matches, err := s.Search(ctx, opts)
 	searchDuration := time.Since(searchStart)
 	if err != nil {
-		logAPIError("search-stream", fmt.Sprintf("搜索失败: %v", err))
+		logAPIError("search-stream", fmt.Sprintf("Search failed: %v", err))
 		writeEvent("error", map[string]string{"message": err.Error()})
 		return
 	}
 
-	logAPIDetail("search-stream", fmt.Sprintf("原始匹配: %d 条 (耗时: %s)", len(matches), formatDuration(searchDuration)))
+	logAPIDetail("search-stream", fmt.Sprintf("Raw matches: %d (duration: %s)", len(matches), formatDuration(searchDuration)))
 
 	matches = applyTimeFilter(matches, opts.From, opts.To)
 
 	for _, m := range matches {
 		select {
 		case <-ctx.Done():
-			logAPIDetail("search-stream", "客户端断开连接")
+			logAPIDetail("search-stream", "Client disconnected")
 			return
 		default:
 			count++
@@ -588,7 +745,7 @@ func handleSearchStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	totalDuration := time.Since(start)
-	logAPIInfo("search-stream", fmt.Sprintf("流式完成: 原始=%d, 过滤后=%d (耗时: %s)",
+	logAPIInfo("search-stream", fmt.Sprintf("Stream complete: raw=%d, filtered=%d (duration: %s)",
 		count, filteredCount, formatDuration(totalDuration)))
 
 	writeEvent("done", map[string]interface{}{
@@ -606,24 +763,24 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 
 	var req SearchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logAPIError("stats", fmt.Sprintf("请求解析失败: %v", err))
-		http.Error(w, fmt.Sprintf("请求解析失败: %v", err), http.StatusBadRequest)
+		logAPIError("stats", fmt.Sprintf("Request parse failed: %v", err))
+		http.Error(w, fmt.Sprintf("Request parse failed: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	logAPIDetail("stats", fmt.Sprintf("请求参数: %s", req.summary()))
+	logAPIDetail("stats", fmt.Sprintf("Request params: %s", req.summary()))
 
 	s := searcher.New()
 	if err := s.CheckRipgrep(); err != nil {
-		logAPIError("stats", fmt.Sprintf("ripgrep 检查失败: %v", err))
+		logAPIError("stats", fmt.Sprintf("ripgrep check failed: %v", err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	opts, files, err := buildOptsFromRequest(req)
 	if err != nil {
-		logAPIError("stats", fmt.Sprintf("构建搜索参数失败: %v", err))
-		http.Error(w, fmt.Sprintf("准备搜索参数失败: %v", err), http.StatusInternalServerError)
+		logAPIError("stats", fmt.Sprintf("Build options failed: %v", err))
+		http.Error(w, fmt.Sprintf("Prepare search params failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -635,12 +792,12 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 	matches, err := s.Search(context.Background(), opts)
 	searchDuration := time.Since(searchStart)
 	if err != nil {
-		logAPIError("stats", fmt.Sprintf("搜索失败: %v", err))
-		http.Error(w, fmt.Sprintf("搜索失败: %v", err), http.StatusInternalServerError)
+		logAPIError("stats", fmt.Sprintf("Search failed: %v", err))
+		http.Error(w, fmt.Sprintf("Search failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	logAPIDetail("stats", fmt.Sprintf("统计匹配: %d 条 (耗时: %s)", len(matches), formatDuration(searchDuration)))
+	logAPIDetail("stats", fmt.Sprintf("Stats matches: %d (duration: %s)", len(matches), formatDuration(searchDuration)))
 
 	matches = applyTimeFilter(matches, opts.From, opts.To)
 
@@ -650,7 +807,7 @@ func handleStats(w http.ResponseWriter, r *http.Request) {
 		stats[level]++
 	}
 
-	logAPIInfo("stats", fmt.Sprintf("统计完成: total=%d, files=%d, 级别=%v", len(matches), len(files), stats))
+	logAPIInfo("stats", fmt.Sprintf("Stats complete: total=%d, files=%d, levels=%v", len(matches), len(files), stats))
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -669,24 +826,24 @@ func handleTrace(w http.ResponseWriter, r *http.Request) {
 
 	var req SearchRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		logAPIError("trace", fmt.Sprintf("请求解析失败: %v", err))
-		http.Error(w, fmt.Sprintf("请求解析失败: %v", err), http.StatusBadRequest)
+		logAPIError("trace", fmt.Sprintf("Request parse failed: %v", err))
+		http.Error(w, fmt.Sprintf("Request parse failed: %v", err), http.StatusBadRequest)
 		return
 	}
 
-	logAPIDetail("trace", fmt.Sprintf("请求参数: %s", req.summary()))
+	logAPIDetail("trace", fmt.Sprintf("Request params: %s", req.summary()))
 
 	s := searcher.New()
 	if err := s.CheckRipgrep(); err != nil {
-		logAPIError("trace", fmt.Sprintf("ripgrep 检查失败: %v", err))
+		logAPIError("trace", fmt.Sprintf("ripgrep check failed: %v", err))
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	opts, _, err := buildOptsFromRequest(req)
 	if err != nil {
-		logAPIError("trace", fmt.Sprintf("构建搜索参数失败: %v", err))
-		http.Error(w, fmt.Sprintf("准备搜索参数失败: %v", err), http.StatusInternalServerError)
+		logAPIError("trace", fmt.Sprintf("Build options failed: %v", err))
+		http.Error(w, fmt.Sprintf("Prepare search params failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 
@@ -697,7 +854,7 @@ func handleTrace(w http.ResponseWriter, r *http.Request) {
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		logAPIError("trace", "Streaming 不支持")
+		logAPIError("trace", "Streaming not supported")
 		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
 		return
 	}
@@ -718,19 +875,19 @@ func handleTrace(w http.ResponseWriter, r *http.Request) {
 	matches, err := s.Search(ctx, opts)
 	searchDuration := time.Since(searchStart)
 	if err != nil {
-		logAPIError("trace", fmt.Sprintf("搜索失败: %v", err))
+		logAPIError("trace", fmt.Sprintf("Search failed: %v", err))
 		writeEvent("error", map[string]string{"message": err.Error()})
 		return
 	}
 
-	logAPIDetail("trace", fmt.Sprintf("原始匹配: %d 条 (耗时: %s)", len(matches), formatDuration(searchDuration)))
+	logAPIDetail("trace", fmt.Sprintf("Raw matches: %d (duration: %s)", len(matches), formatDuration(searchDuration)))
 
 	matches = applyTimeFilter(matches, opts.From, opts.To)
 
 	for _, m := range matches {
 		select {
 		case <-ctx.Done():
-			logAPIDetail("trace", "客户端断开连接")
+			logAPIDetail("trace", "Client disconnected")
 			return
 		default:
 			count++
@@ -739,7 +896,7 @@ func handleTrace(w http.ResponseWriter, r *http.Request) {
 	}
 
 	totalDuration := time.Since(searchStart)
-	logAPIInfo("trace", fmt.Sprintf("追踪完成: total=%d (耗时: %s)", count, formatDuration(totalDuration)))
+	logAPIInfo("trace", fmt.Sprintf("Trace complete: total=%d (duration: %s)", count, formatDuration(totalDuration)))
 
 	writeEvent("done", map[string]interface{}{
 		"total_matches": count,
@@ -787,12 +944,12 @@ func pathsSummary(paths []string) string {
 	}
 	first := paths[:3]
 	last := paths[len(paths)-1:]
-	return fmt.Sprintf("%v ... %v (共 %d 个)", first, last, len(paths))
+	return fmt.Sprintf("%v ... %v (total %d)", first, last, len(paths))
 }
 
 func formatTime(t time.Time) string {
 	if t.IsZero() {
-		return "未设置"
+		return "not set"
 	}
 	return t.Format("2006-01-02 15:04")
 }

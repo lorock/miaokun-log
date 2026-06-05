@@ -158,6 +158,13 @@
                       placeholder="后"
                     />
                     <span class="context-sep">行</span>
+                    <el-switch
+                      v-model="form.showContext"
+                      active-text="显示"
+                      inactive-text="隐藏"
+                      :disabled="form.before === 0 && form.after === 0"
+                      class="context-switch"
+                    />
                   </div>
                 </el-form-item>
               </el-col>
@@ -178,6 +185,15 @@
                       >
                         {{ selectedPaths.length > 0 ? '已选 ' + selectedPaths.length + ' 个路径' : '点击选择或输入自定义路径' }}
                       </el-tag>
+                      <el-button
+                        size="small"
+                        type="primary"
+                        plain
+                        class="browse-btn"
+                        @click="showFileBrowser = true"
+                      >
+                        📁 浏览文件
+                      </el-button>
                     </div>
                   </template>
                   <el-select
@@ -219,13 +235,20 @@
         </el-collapse-item>
       </el-collapse>
     </el-card>
+
+    <!-- 文件浏览模态框 -->
+    <FileBrowserModal
+      v-model:visible="showFileBrowser"
+      @select="handleFileSelect"
+    />
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue';
 
-import type { LogStats, SearchRequest } from '../types';
+import type { LogStats, SearchRequest, FileInfo } from '../types';
+import FileBrowserModal from './FileBrowserModal.vue';
 
 defineProps<{
   isStreaming: boolean;
@@ -244,6 +267,15 @@ interface PathCandidate {
   total_size: number;
   is_default: boolean;
 }
+
+const showFileBrowser = ref(false);
+
+const handleFileSelect = (file: FileInfo) => {
+  const path = file.is_dir ? file.full_path : file.path;
+  if (!selectedPaths.value.includes(path)) {
+    selectedPaths.value.push(path);
+  }
+};
 
 const timeShortcuts = [
   {
@@ -333,6 +365,7 @@ const form = reactive({
   sinceDays: 3,
   before: 3,
   after: 5,
+  showContext: true,
   timeRange: [] as string[],
 });
 
@@ -366,6 +399,8 @@ const loadPaths = async () => {
           selectedPaths.value = [withFiles[0].path];
         }
       }
+    } else if (res.status === 401) {
+      console.warn('加载路径失败: 登录已过期');
     }
   } catch (e) {
     console.warn('加载路径失败', e);
@@ -389,8 +424,13 @@ const handleSearch = () => {
   };
 
   if (form.level) request.level = form.level;
-  if (form.before > 0) request.before = form.before;
-  if (form.after > 0) request.after = form.after;
+  
+  // 根据是否显示上下文来决定是否传递上下文行数
+  if (form.showContext) {
+    if (form.before > 0) request.before = form.before;
+    if (form.after > 0) request.after = form.after;
+  }
+  
   if (selectedPaths.value.length > 0) {
     request.paths = [...selectedPaths.value];
   }
@@ -406,6 +446,7 @@ const handleSearch = () => {
 <style scoped>
 .search-form-container {
   padding: 16px 24px;
+  flex-shrink: 0;
 }
 
 .search-card {
@@ -506,6 +547,12 @@ const handleSearch = () => {
   display: flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
+}
+
+.browse-btn {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .tag-hint {

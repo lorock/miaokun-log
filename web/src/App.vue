@@ -1,69 +1,152 @@
 <template>
-  <div class="app-container">
-    <header class="header">
-      <div class="logo">
-        <el-tooltip content="喵坤®" placement="bottom">
-          <img 
-            src="/assets/logo.png" 
-            alt="喵坤®" 
-            :class="['logo-icon', { zoomed: logoZoomed }]" 
-            @click="toggleLogoZoom"
-          />
-        </el-tooltip>
-      </div>
-      <div class="header-title">
-        <span class="title-main">喵坤®日志排查工具</span>
-      </div>
-      <div class="header-features">
-        <span class="feature-tag">极速搜索</span>
-        <span class="feature-tag">全链路追踪</span>
-        <span class="feature-tag">流式处理</span>
-      </div>
-    </header>
+  <AuthGuard>
+    <div class="app-container">
+      <header class="header">
+        <div class="logo">
+          <el-tooltip content="喵坤®" placement="bottom">
+            <img
+              src="/assets/logo.png"
+              alt="喵坤®"
+              :class="['logo-icon', { zoomed: logoZoomed }]"
+              @click="toggleLogoZoom"
+            />
+          </el-tooltip>
+        </div>
+        <div class="header-title">
+          <span class="title-main">喵坤®日志排查工具</span>
+        </div>
+        <div class="header-content">
+          <div class="header-features">
+            <span class="feature-tag">极速搜索</span>
+            <span class="feature-tag">全链路追踪</span>
+            <span class="feature-tag">流式处理</span>
+          </div>
+          <div v-if="user" class="header-user">
+            <el-dropdown @command="handleDropdownCommand">
+              <span class="user-info">
+                <el-icon class="user-icon"><User /></el-icon>
+                <span>{{ user.username }}</span>
+                <span class="arrow-icon">▼</span>
+              </span>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="profile">👤 个人中心</el-dropdown-item>
+                  <el-dropdown-item command="settings">⚙️ 设置</el-dropdown-item>
+                  <el-dropdown-item divided command="logout">🚪 登出</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
+        </div>
+      </header>
 
-    <SearchForm :is-streaming="isStreaming" :stats="stats" @search="handleSearch" @stop="stopSearch" />
+      <SearchForm
+        :is-streaming="isStreaming"
+        :stats="stats"
+        @search="handleSearch"
+        @stop="stopSearch"
+      />
 
-    <div class="log-container">
-      <LogList :logs="logs" />
+      <el-alert
+        v-if="error"
+        type="error"
+        :closable="false"
+        class="error-alert"
+        show-icon
+      >
+        <template #title>
+          <span>{{ error }}</span>
+        </template>
+      </el-alert>
+
+      <el-alert
+        v-if="reachedLimit"
+        type="warning"
+        :closable="false"
+        class="limit-warning"
+      >
+        <template #title>
+          <span class="warning-title">
+            ⚠️ 日志数量已达上限 {{ MAX_LOGS }} 条，已自动丢弃最早的部分日志
+          </span>
+        </template>
+        <template #default>
+          <span class="warning-detail">
+            实际匹配 {{ displayTotal }} 条，当前显示 {{ displayCount }} 条。建议缩小搜索范围或增加筛选条件。
+          </span>
+        </template>
+      </el-alert>
+
+      <div class="log-container">
+        <LogList :logs="logs" :is-streaming="isStreaming" :search-pattern="searchPattern" />
+      </div>
+
+      <footer class="footer">
+        <div class="footer-left">
+          <span class="version">{{ version }}</span>
+          <span class="footer-dot">·</span>
+          <span>基于 Ripgrep 引擎</span>
+        </div>
+        <div class="footer-center">
+          <span class="footer-text">为开发者打造的轻量生产力工具</span>
+        </div>
+        <div class="footer-right">
+          <a href="https://gitee.com/lorock/miaokun-log" target="_blank" class="footer-link">Gitee</a>
+          <span class="footer-dot">·</span>
+          <a href="https://gitee.com/lorock/miaokun-log/issues" target="_blank" class="footer-link">反馈</a>
+        </div>
+      </footer>
     </div>
-
-    <footer class="footer">
-      <div class="footer-left">
-        <span class="version">{{ version }}</span>
-        <span class="footer-dot">·</span>
-        <span>基于 Ripgrep 引擎</span>
-      </div>
-      <div class="footer-center">
-        <span class="footer-text">为开发者打造的轻量生产力工具</span>
-      </div>
-      <div class="footer-right">
-        <a href="https://gitee.com/lorock/miaokun-log" target="_blank" class="footer-link">Gitee</a>
-        <span class="footer-dot">·</span>
-        <a href="https://gitee.com/lorock/miaokun-log/issues" target="_blank" class="footer-link">反馈</a>
-      </div>
-    </footer>
-  </div>
+  </AuthGuard>
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
+import { User } from '@element-plus/icons-vue';
+import { ElMessage } from 'element-plus';
 import { useLogStream } from './composables/useLogStream';
 import { useVersion } from './composables/useVersion';
+import { useAuth } from './composables/useAuth';
+import { AUTH_EVENTS } from './types/auth';
+import AuthGuard from './components/AuthGuard.vue';
 import SearchForm from './components/SearchForm.vue';
 import LogList from './components/LogList.vue';
 import type { SearchRequest } from './types';
 
-const { logs, stats, isStreaming, start, stop: stopSearch } = useLogStream();
+const { logs, stats, isStreaming, error, reachedLimit, displayTotal, displayCount, MAX_LOGS, start, stop: stopSearch } = useLogStream();
 const { version } = useVersion();
+const { user, logout } = useAuth();
 
 const logoZoomed = ref(false);
+const searchPattern = ref('');
+
+const handleUnauthorized = (event: Event) => {
+  const customEvent = event as CustomEvent;
+  const message = customEvent.detail?.message || '登录已过期，请重新登录';
+  ElMessage.error(message);
+};
+
+onMounted(() => {
+  window.addEventListener(AUTH_EVENTS.UNAUTHORIZED, handleUnauthorized);
+});
+
+onUnmounted(() => {
+  window.removeEventListener(AUTH_EVENTS.UNAUTHORIZED, handleUnauthorized);
+});
 
 const toggleLogoZoom = () => {
   logoZoomed.value = !logoZoomed.value;
 };
 
 const handleSearch = (request: SearchRequest) => {
+  searchPattern.value = request.pattern;
   start(request);
+};
+
+const handleDropdownCommand = (command: string) => {
+  if (command === 'logout') {
+    logout();
+  }
 };
 </script>
 
@@ -71,7 +154,7 @@ const handleSearch = (request: SearchRequest) => {
 .app-container {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: 100vh;
   background-color: #f5f7fa;
 }
 
@@ -86,6 +169,7 @@ const handleSearch = (request: SearchRequest) => {
   gap: 12px;
   position: relative;
   overflow: hidden;
+  flex-shrink: 0;
 }
 
 .header::before {
@@ -130,8 +214,6 @@ const handleSearch = (request: SearchRequest) => {
   border: 3px solid white;
 }
 
-
-
 .header-title {
   display: flex;
   align-items: center;
@@ -144,9 +226,16 @@ const handleSearch = (request: SearchRequest) => {
   letter-spacing: 1px;
 }
 
+.header-content {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
 .header-features {
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
 }
 
 .feature-tag {
@@ -160,14 +249,59 @@ const handleSearch = (request: SearchRequest) => {
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
+.header-user {
+  flex-shrink: 0;
+}
+
+.user-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: white;
+  font-size: 14px;
+  cursor: pointer;
+  padding: 8px 12px;
+  border-radius: 8px;
+  transition: background 0.2s ease;
+}
+
+.user-info:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.user-icon,
+.arrow-icon {
+  font-size: 14px;
+}
+
 .log-container {
   flex: 1;
-  min-height: 300px;
-  margin: 16px 24px;
+  min-height: 0;
+  margin: 0 24px 16px 24px;
   background: white;
   border-radius: 8px;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.06);
-  overflow: hidden;
+  overflow-y: auto;
+  flex-shrink: 1;
+}
+
+.error-alert {
+  margin: 0 24px 12px 24px;
+  flex-shrink: 0;
+}
+
+.limit-warning {
+  margin: 0 24px;
+  flex-shrink: 0;
+}
+
+.warning-title {
+  font-weight: 600;
+}
+
+.warning-detail {
+  font-size: 13px;
+  color: #64748b;
 }
 
 .footer {
@@ -181,6 +315,7 @@ const handleSearch = (request: SearchRequest) => {
   border-top: 1px solid #ebeef5;
   flex-wrap: wrap;
   gap: 8px;
+  flex-shrink: 0;
 }
 
 .footer-left,
@@ -224,11 +359,17 @@ const handleSearch = (request: SearchRequest) => {
     flex-direction: column;
     text-align: center;
   }
-  
+
+  .header-content {
+    flex-direction: column;
+    width: 100%;
+    gap: 12px;
+  }
+
   .header-features {
     justify-content: center;
   }
-  
+
   .footer-center {
     position: static;
     transform: none;
@@ -236,14 +377,18 @@ const handleSearch = (request: SearchRequest) => {
     width: 100%;
     justify-content: center;
   }
-  
+
   .footer-left,
   .footer-right {
     width: 50%;
   }
-  
+
   .footer-right {
     justify-content: flex-end;
+  }
+
+  .log-container {
+    margin: 8px 16px;
   }
 }
 </style>
