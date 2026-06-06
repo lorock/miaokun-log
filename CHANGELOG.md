@@ -43,6 +43,13 @@
   - 前端 `SearchForm.vue`：`handleSearch` 增加 `timeRange` null 检查，修复清空时间范围后搜索静默失败
   - `server.SearchRequest.summary()` 增加 `from`/`to` 字段输出，便于调试
 
+- **修复上下文行（before/after）未正常显示的问题**
+  - **根因**：`contextLineRegex` 正则表达式错误，假设上下文行格式为 `filename-linenum-content`，实际 ripgrep 格式为 `linenum-content`（行号后面是 `-` 号）
+  - **修复**：`parseLine` 函数重构，正确解析 ripgrep 上下文行格式
+  - 新增 `currentFile` 变量跟踪当前文件名（多文件搜索时）
+  - 正确处理文件名行（ripgrep 在多文件搜索时会先输出文件名）
+  - 上下文行解析逻辑：`^(\d+)-(.*)$` 提取行号和内容简介
+
 ## [v0.6.1](https://gitee.com/lorock/miaokun-log/releases/v0.6.1) - 2026-06-06
 
 ### 🐛 问题修复
