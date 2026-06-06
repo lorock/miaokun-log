@@ -409,8 +409,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	rgArgs := s.BuildArgs(opts)
-	err = s.SearchStream(cmd.Context(), rgArgs, opts, func(m types.LogMatch) bool {
+	err = s.SearchStream(cmd.Context(), opts, func(m types.LogMatch) bool {
 		out.PrintMatch(m)
 		return true
 	})

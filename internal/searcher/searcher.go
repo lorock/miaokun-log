@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -29,6 +32,45 @@ func (s *Searcher) CheckRipgrep() error {
 	return nil
 }
 
+// expandPaths 将 paths（可能包含目录）展开为具体文件列表，应用 glob 过滤
+func expandPaths(paths []string, globs []string) ([]string, error) {
+	var files []string
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue // 跳过不存在的路径
+		}
+		if !info.IsDir() {
+			files = append(files, p)
+			continue
+		}
+		// 递归遍历目录
+		filepath.WalkDir(p, func(path string, d os.DirEntry, err error) error {
+			if err != nil || d.IsDir() {
+				return nil
+			}
+			if len(globs) > 0 {
+				matched := false
+				for _, g := range globs {
+					if m, err := filepath.Match(g, filepath.Base(path)); err == nil && m {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					return nil
+				}
+			}
+			files = append(files, path)
+			return nil
+		})
+	}
+	return files, nil
+}
+
+// BuildArgs 构建 rg 命令行参数（供外部调用，保持向后兼容）
+// 注意：新的 Search / SearchStream 内部已自行处理参数构建，
+// 此方法主要用于测试或需要直接获取 rg 参数的场景。
 func (s *Searcher) BuildArgs(opts types.SearchOptions) []string {
 	args := []string{
 		"-n",
@@ -42,7 +84,6 @@ func (s *Searcher) BuildArgs(opts types.SearchOptions) []string {
 		args = append(args, "-i")
 	}
 
-	// 添加上下文参数
 	if opts.Before > 0 {
 		args = append(args, "-B", fmt.Sprintf("%d", opts.Before))
 	}
@@ -60,155 +101,189 @@ func (s *Searcher) BuildArgs(opts types.SearchOptions) []string {
 	return args
 }
 
+// rgArgsForFile 构建单个文件的 rg 参数（不含文件路径）
+func rgArgsForFile(opts types.SearchOptions) []string {
+	args := []string{
+		"-n",
+		"--no-heading",
+		"--color", "never",
+		"--max-count", fmt.Sprintf("%d", opts.MaxCount),
+	}
+	if opts.CaseInsensitive {
+		args = append(args, "-i")
+	}
+	if opts.Before > 0 {
+		args = append(args, "-B", fmt.Sprintf("%d", opts.Before))
+	}
+	if opts.After > 0 {
+		args = append(args, "-A", fmt.Sprintf("%d", opts.After))
+	}
+	args = append(args, opts.Pattern)
+	return args
+}
+
+// Search 非流式搜索，返回全部结果
 func (s *Searcher) Search(ctx context.Context, opts types.SearchOptions) ([]types.LogMatch, error) {
 	if err := s.CheckRipgrep(); err != nil {
 		return nil, err
 	}
-
-	args := s.BuildArgs(opts)
 	var matches []types.LogMatch
-
-	err := s.SearchStream(ctx, args, opts, func(m types.LogMatch) bool {
+	err := s.searchAllFiles(ctx, opts, func(m types.LogMatch) bool {
 		matches = append(matches, m)
 		return true
 	})
+	return matches, err
+}
 
+// SearchStream 流式搜索，逐个文件搜索，搜到即回调
+func (s *Searcher) SearchStream(_ context.Context, opts types.SearchOptions, callback func(types.LogMatch) bool) error {
+	if err := s.CheckRipgrep(); err != nil {
+		return err
+	}
+	return s.searchAllFiles(context.Background(), opts, callback)
+}
+
+// searchAllFiles 展开文件列表，逐个文件调用 rg，流式回调
+func (s *Searcher) searchAllFiles(ctx context.Context, opts types.SearchOptions, callback func(types.LogMatch) bool) error {
+	files, err := expandPaths(opts.Paths, opts.Glob)
 	if err != nil {
-		return nil, err
+		return err
+	}
+
+	for _, file := range files {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		matches, err := s.searchSingleFile(ctx, file, opts)
+		if err != nil {
+			continue // 单个文件失败跳过
+		}
+		for _, m := range matches {
+			if opts.Level != "" && !strings.Contains(strings.ToUpper(m.Raw), strings.ToUpper(opts.Level)) {
+				continue
+			}
+			if !callback(m) {
+				return nil // 调用方要求停止
+			}
+		}
+	}
+	return nil
+}
+
+// searchSingleFile 对单个文件执行 rg，解析输出并返回匹配列表
+func (s *Searcher) searchSingleFile(ctx context.Context, file string, opts types.SearchOptions) ([]types.LogMatch, error) {
+	args := rgArgsForFile(opts)
+	args = append(args, file)
+
+	cmd := exec.CommandContext(ctx, s.RGPath, args...)
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("创建 stdout pipe 失败: %w", err)
+	}
+	defer stdout.Close()
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("启动 rg 失败: %w", err)
+	}
+
+	matches := parseSingleFileStream(stdout, file, opts)
+
+	if err := cmd.Wait(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return matches, nil // 无匹配不是错误
+		}
+		return matches, nil // 已有部分结果，不中断
 	}
 
 	return matches, nil
 }
 
-func (s *Searcher) SearchStream(ctx context.Context, args []string, opts types.SearchOptions, callback func(types.LogMatch) bool) error {
-	cmd := exec.CommandContext(ctx, s.RGPath, args...)
+// parseSingleFileStream 从 stdout 流式解析单个文件的 rg 输出
+// 单文件 rg 输出格式（无 -H）：
+//   匹配行：linenum:content
+//   上下文行（before/after）：linenum-content  （注意是 - 不是 :）
+//   不同匹配之间用 -- 分隔
+func parseSingleFileStream(r io.Reader, file string, opts types.SearchOptions) []types.LogMatch {
+	var matches []types.LogMatch
 
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return fmt.Errorf("创建 stdout pipe 失败: %w", err)
-	}
-	defer stdout.Close()
+	matchRegex := regexp.MustCompile(`^(\d+):(.*)$`)
+	ctxRegex := regexp.MustCompile(`^(\d+)-(.*)$`)
 
-	stderr, err := cmd.StderrPipe()
-	if err != nil {
-		return fmt.Errorf("创建 stderr pipe 失败: %w", err)
-	}
-	defer stderr.Close()
-
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("启动 rg 失败: %w", err)
-	}
-
-	// 收集 stderr
-	var stderrBuf strings.Builder
-	go func() {
-		scanner := bufio.NewScanner(stderr)
-		for scanner.Scan() {
-			stderrBuf.WriteString(scanner.Text())
-		}
-	}()
-
-	// 流式解析 stdout
-	hasContext := opts.Before > 0 || opts.After > 0
-	matchLineRegex := regexp.MustCompile(`^(.+):(\d+):(.*)$`)
-	// ripgrep 上下文行格式：行号-内容（注意是 - 不是 :）
-	contextLineRegex := regexp.MustCompile(`^(\d+)-(.*)$`)
-
-	scanner := bufio.NewScanner(stdout)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-
-	// 我们用一个内部结构体来分别跟踪 before 和 after context
-	type MatchInternal struct {
-		File          string
-		LineNum       int
-		Raw           string
-		BeforeContext []string
-		AfterContext  []string
+	type matchInternal struct {
+		lineNum       int
+		raw           string
+		beforeCtx     []string
+		afterCtx      []string
 	}
 
-	var currentMatch *MatchInternal
+	var current *matchInternal
 	var beforeLines []string
-	var currentFile string // 跟踪当前文件名（多文件搜索时）
+
+	flush := func() {
+		if current == nil {
+			return
+		}
+		// 截断 after context 到 opts.After
+		after := current.afterCtx
+		if opts.After > 0 && len(after) > opts.After {
+			after = after[:opts.After]
+		}
+		// 截断 before context 到 opts.Before
+		before := current.beforeCtx
+		if opts.Before > 0 && len(before) > opts.Before {
+			before = before[len(before)-opts.Before:]
+		}
+		m := types.LogMatch{
+			File:          file,
+			LineNum:       current.lineNum,
+			Raw:           current.raw,
+			BeforeContext: before,
+			AfterContext:  after,
+			Context:       append(append([]string{}, before...), after...),
+		}
+		matches = append(matches, m)
+		current = nil
+		beforeLines = []string{}
+	}
+
+	scanner := bufio.NewScanner(r)
+	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
 			continue
 		}
-
-		// ripgrep 用 -- 分隔不同匹配
 		if line == "--" {
-			if currentMatch != nil {
-				// 转换为 LogMatch 并回调
-				m := types.LogMatch{
-					File:          currentMatch.File,
-					LineNum:       currentMatch.LineNum,
-					Raw:           currentMatch.Raw,
-					BeforeContext: currentMatch.BeforeContext,
-					AfterContext:  currentMatch.AfterContext,
-					Context:       append(append([]string{}, currentMatch.BeforeContext...), currentMatch.AfterContext...),
-				}
-				if opts.Level == "" || strings.Contains(strings.ToUpper(m.Raw), strings.ToUpper(opts.Level)) {
-					if !callback(m) {
-						cmd.Process.Kill()
-						return nil
-					}
-				}
+			flush()
+			continue
+		}
+
+		// 尝试匹配行
+		if groups := matchRegex.FindStringSubmatch(line); len(groups) == 3 {
+			flush()
+			lineNum, _ := strconv.Atoi(groups[1])
+			current = &matchInternal{
+				lineNum:   lineNum,
+				raw:        groups[2],
+				beforeCtx:  append([]string{}, beforeLines...),
+				afterCtx:   []string{},
 			}
-			currentMatch = nil
 			beforeLines = []string{}
 			continue
 		}
 
-		// 检查是否是文件名行（多文件搜索时，ripgrep 会先输出文件名）
-		if !strings.Contains(line, ":") && !strings.Contains(line, "-") && line != "--" {
-			currentFile = line
-			continue
-		}
-
-		isMatch, isContext, file, lineNum, content := parseLine(line, matchLineRegex, contextLineRegex, currentFile)
-
-		if isMatch {
-			if currentMatch != nil {
-				// 关键！在处理新匹配之前，把前一个匹配的 after context 截断到 opts.After
-				if opts.After > 0 && len(currentMatch.AfterContext) > opts.After {
-					currentMatch.AfterContext = currentMatch.AfterContext[:opts.After]
-				}
-				// 转换为 LogMatch 并回调
-				m := types.LogMatch{
-					File:          currentMatch.File,
-					LineNum:       currentMatch.LineNum,
-					Raw:           currentMatch.Raw,
-					BeforeContext: currentMatch.BeforeContext,
-					AfterContext:  currentMatch.AfterContext,
-					Context:       append(append([]string{}, currentMatch.BeforeContext...), currentMatch.AfterContext...),
-				}
-				if opts.Level == "" || strings.Contains(strings.ToUpper(m.Raw), strings.ToUpper(opts.Level)) {
-					if !callback(m) {
-						cmd.Process.Kill()
-						return nil
-					}
-				}
-			}
-			currentMatch = &MatchInternal{
-				File:          file,
-				LineNum:       lineNum,
-				Raw:           content,
-				BeforeContext: append([]string{}, beforeLines...),
-				AfterContext:  []string{},
-			}
-			// 关键！在设置新的 currentMatch 后，我们要把 beforeLines 重置
-			beforeLines = []string{}
-			continue
-		}
-
-		if hasContext && isContext {
-			if currentMatch != nil {
-				// 这是 after context
-				currentMatch.AfterContext = append(currentMatch.AfterContext, content)
+		// 尝试上下文行
+		if groups := ctxRegex.FindStringSubmatch(line); len(groups) == 3 {
+			if current != nil {
+				current.afterCtx = append(current.afterCtx, groups[2])
 			} else {
-				// 这是 before context，保留最后 N 行
-				beforeLines = append(beforeLines, content)
+				beforeLines = append(beforeLines, groups[2])
+				// 只保留最后 N 行作为 before context
 				if opts.Before > 0 && len(beforeLines) > opts.Before {
 					beforeLines = beforeLines[len(beforeLines)-opts.Before:]
 				}
@@ -216,154 +291,98 @@ func (s *Searcher) SearchStream(ctx context.Context, args []string, opts types.S
 		}
 	}
 
-	if currentMatch != nil {
-		// 截断最后一个 match 的 after context 到 opts.After
-		if opts.After > 0 && len(currentMatch.AfterContext) > opts.After {
-			currentMatch.AfterContext = currentMatch.AfterContext[:opts.After]
+	flush()
+	return matches
+}
+
+// ParseOutput 解析 rg 输出字符串（用于测试或非流式场景）
+// output 是单文件 rg 输出（不含文件名）
+func ParseOutput(output string, hasContext bool) []types.LogMatch {
+	// 伪造一个 opts，Only Before/After 从 hasContext 无法得知，默认 0
+	// 实际使用时 SearchOptions 会传进来，这个函数主要用于测试
+	opts := types.SearchOptions{}
+	return parseOutputFromString("", output, opts)
+}
+
+// parseOutputFromString 从字符串解析（非流式，用于测试）
+func parseOutputFromString(file, output string, opts types.SearchOptions) []types.LogMatch {
+	return parseLines(strings.Split(output, "\n"), file, opts)
+}
+
+// parseLines 解析行列表（供测试用）
+func parseLines(lines []string, file string, opts types.SearchOptions) []types.LogMatch {
+	matchRegex := regexp.MustCompile(`^(\d+):(.*)$`)
+	ctxRegex := regexp.MustCompile(`^(\d+)-(.*)$`)
+
+	type matchInternal struct {
+		lineNum   int
+		raw       string
+		beforeCtx []string
+		afterCtx  []string
+	}
+
+	var matches []types.LogMatch
+	var current *matchInternal
+	var beforeLines []string
+
+	flush := func() {
+		if current == nil {
+			return
+		}
+		after := current.afterCtx
+		if opts.After > 0 && len(after) > opts.After {
+			after = after[:opts.After]
+		}
+		before := current.beforeCtx
+		if opts.Before > 0 && len(before) > opts.Before {
+			before = before[len(before)-opts.Before:]
 		}
 		m := types.LogMatch{
-			File:          currentMatch.File,
-			LineNum:       currentMatch.LineNum,
-			Raw:           currentMatch.Raw,
-			BeforeContext: currentMatch.BeforeContext,
-			AfterContext:  currentMatch.AfterContext,
-			Context:       append(append([]string{}, currentMatch.BeforeContext...), currentMatch.AfterContext...),
+			File:          file,
+			LineNum:       current.lineNum,
+			Raw:           current.raw,
+			BeforeContext: before,
+			AfterContext:  after,
+			Context:       append(append([]string{}, before...), after...),
 		}
-		if opts.Level == "" || strings.Contains(strings.ToUpper(m.Raw), strings.ToUpper(opts.Level)) {
-			callback(m)
-		}
+		matches = append(matches, m)
+		current = nil
+		beforeLines = []string{}
 	}
-
-	if err := cmd.Wait(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
-			// rg 返回 1 表示没有匹配，不是错误
-			return nil
-		}
-		if stderrBuf.Len() > 0 {
-			return fmt.Errorf("rg 错误: %s", stderrBuf.String())
-		}
-		return fmt.Errorf("执行 rg 失败: %w", err)
-	}
-
-	return nil
-}
-
-func parseLine(line string, matchLineRegex, contextLineRegex *regexp.Regexp, currentFile string) (bool, bool, string, int, string) {
-	// 尝试匹配行：filename:linenum:content
-	// 注意：filename 可能包含 :，所以从右边找 :linenum: 模式
-	if matchGroups := matchLineRegex.FindStringSubmatch(line); len(matchGroups) == 4 {
-		if lineNum, err := strconv.Atoi(matchGroups[2]); err == nil && lineNum > 0 {
-			return true, false, matchGroups[1], lineNum, matchGroups[3]
-		}
-	}
-
-	// 尝试上下文行：linenum-content（ripgrep 上下文格式）
-	if ctxGroups := contextLineRegex.FindStringSubmatch(line); len(ctxGroups) == 3 {
-		if lineNum, err := strconv.Atoi(ctxGroups[1]); err == nil && lineNum > 0 {
-			return false, true, currentFile, lineNum, ctxGroups[2]
-		}
-	}
-
-	return false, false, "", 0, ""
-}
-
-func ParseOutput(output string, hasContext bool) []types.LogMatch {
-	var matches []types.LogMatch
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-
-	// 正则表达式：匹配行格式 file:line:content
-	matchLineRegex := regexp.MustCompile(`^(.+):(\d+):(.*)$`)
-	// 正则表达式：上下文行格式 line-content（ripgrep 格式）
-	contextLineRegex := regexp.MustCompile(`^(\d+)-(.*)$`)
-
-	type MatchInternal struct {
-		File          string
-		LineNum       int
-		Raw           string
-		BeforeContext []string
-		AfterContext  []string
-	}
-	var currentMatch *MatchInternal
-	var beforeLines []string
-	var currentFile string
 
 	for _, line := range lines {
+		line = strings.TrimRight(line, "\r")
 		if line == "" {
 			continue
 		}
-
-		// 检查是否是文件名行
-		if !strings.Contains(line, ":") && !strings.Contains(line, "-") && line != "--" {
-			currentFile = line
-			continue
-		}
-
-		// ripgrep 用 -- 分隔不同匹配
 		if line == "--" {
-			if currentMatch != nil {
-				m := types.LogMatch{
-					File:          currentMatch.File,
-					LineNum:       currentMatch.LineNum,
-					Raw:           currentMatch.Raw,
-					BeforeContext: currentMatch.BeforeContext,
-					AfterContext:  currentMatch.AfterContext,
-					Context:       append(append([]string{}, currentMatch.BeforeContext...), currentMatch.AfterContext...),
-				}
-				matches = append(matches, m)
-			}
-			currentMatch = nil
-			beforeLines = []string{}
+			flush()
 			continue
 		}
-
-		isMatch, isContext, file, lineNum, content := parseLine(line, matchLineRegex, contextLineRegex, currentFile)
-
-		// 决策逻辑：优先匹配行
-		if isMatch {
-			if currentMatch != nil {
-				m := types.LogMatch{
-					File:          currentMatch.File,
-					LineNum:       currentMatch.LineNum,
-					Raw:           currentMatch.Raw,
-					BeforeContext: currentMatch.BeforeContext,
-					AfterContext:  currentMatch.AfterContext,
-					Context:       append(append([]string{}, currentMatch.BeforeContext...), currentMatch.AfterContext...),
-				}
-				matches = append(matches, m)
-			}
-			currentMatch = &MatchInternal{
-				File:          file,
-				LineNum:       lineNum,
-				Raw:           content,
-				BeforeContext: append([]string{}, beforeLines...),
-				AfterContext:  []string{},
+		if groups := matchRegex.FindStringSubmatch(line); len(groups) == 3 {
+			flush()
+			lineNum, _ := strconv.Atoi(groups[1])
+			current = &matchInternal{
+				lineNum:  lineNum,
+				raw:       groups[2],
+				beforeCtx: append([]string{}, beforeLines...),
+				afterCtx:  []string{},
 			}
 			beforeLines = []string{}
 			continue
 		}
-
-		// 检查是不是上下文行
-		if hasContext && isContext {
-			if currentMatch != nil {
-				currentMatch.AfterContext = append(currentMatch.AfterContext, content)
+		if groups := ctxRegex.FindStringSubmatch(line); len(groups) == 3 {
+			if current != nil {
+				current.afterCtx = append(current.afterCtx, groups[2])
 			} else {
-				beforeLines = append(beforeLines, content)
+				beforeLines = append(beforeLines, groups[2])
+				if opts.Before > 0 && len(beforeLines) > opts.Before {
+					beforeLines = beforeLines[len(beforeLines)-opts.Before:]
+				}
 			}
 		}
 	}
 
-	// 最后一个匹配
-	if currentMatch != nil {
-		m := types.LogMatch{
-			File:          currentMatch.File,
-			LineNum:       currentMatch.LineNum,
-			Raw:           currentMatch.Raw,
-			BeforeContext: currentMatch.BeforeContext,
-			AfterContext:  currentMatch.AfterContext,
-			Context:       append(append([]string{}, currentMatch.BeforeContext...), currentMatch.AfterContext...),
-		}
-		matches = append(matches, m)
-	}
-
+	flush()
 	return matches
 }
