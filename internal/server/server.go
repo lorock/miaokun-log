@@ -471,8 +471,16 @@ func (r SearchRequest) summary() string {
 	if r.Level != "" {
 		levelStr = r.Level
 	}
-	return fmt.Sprintf("pattern=%q, paths=%d, level=%s, case_insensitive=%v, max_count=%d, before=%d, after=%d, since=%.0fdays",
-		r.Pattern, len(r.Paths), levelStr, r.CaseInsensitive, r.MaxCount, r.Before, r.After, r.SinceDays)
+	fromStr := r.From
+	if fromStr == "" {
+		fromStr = "none"
+	}
+	toStr := r.To
+	if toStr == "" {
+		toStr = "none"
+	}
+	return fmt.Sprintf("pattern=%q, paths=%d, level=%s, case_insensitive=%v, max_count=%d, before=%d, after=%d, since=%.0fdays, from=%s, to=%s",
+		r.Pattern, len(r.Paths), levelStr, r.CaseInsensitive, r.MaxCount, r.Before, r.After, r.SinceDays, fromStr, toStr)
 }
 
 func handleVersion(w http.ResponseWriter, r *http.Request) {
@@ -525,15 +533,27 @@ func buildOptsFromRequest(req SearchRequest) (types.SearchOptions, []string, err
 	}
 
 	if req.From != "" {
-		t, err := time.Parse("2006-01-02 15:04", req.From)
+		t, err := time.ParseInLocation("2006-01-02 15:04", req.From, time.Local)
 		if err == nil {
 			opts.From = t
+		} else {
+			// Try with seconds
+			t, err = time.ParseInLocation("2006-01-02 15:04:05", req.From, time.Local)
+			if err == nil {
+				opts.From = t
+			}
 		}
 	}
 	if req.To != "" {
-		t, err := time.Parse("2006-01-02 15:04", req.To)
+		t, err := time.ParseInLocation("2006-01-02 15:04", req.To, time.Local)
 		if err == nil {
 			opts.To = t
+		} else {
+			// Try with seconds
+			t, err = time.ParseInLocation("2006-01-02 15:04:05", req.To, time.Local)
+			if err == nil {
+				opts.To = t
+			}
 		}
 	}
 
@@ -547,10 +567,10 @@ func applyTimeFilter(matches []types.LogMatch, from, to time.Time) []types.LogMa
 
 	tf := timefilter.New()
 	if !from.IsZero() {
-		_ = tf.SetFrom(from.Format("2006-01-02 15:04"))
+		_ = tf.SetFrom(from.Format("2006-01-02 15:04:05.000"))
 	}
 	if !to.IsZero() {
-		_ = tf.SetTo(to.Format("2006-01-02 15:04"))
+		_ = tf.SetTo(to.Format("2006-01-02 15:04:05.000"))
 	}
 
 	return tf.Filter(matches)

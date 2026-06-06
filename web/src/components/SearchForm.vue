@@ -434,7 +434,7 @@ const handleSearch = () => {
   if (selectedPaths.value.length > 0) {
     request.paths = [...selectedPaths.value];
   }
-  if (form.timeRange.length === 2) {
+  if (form.timeRange && form.timeRange.length === 2) {
     request.from = form.timeRange[0];
     request.to = form.timeRange[1];
   }

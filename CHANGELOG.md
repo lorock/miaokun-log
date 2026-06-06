@@ -2,6 +2,47 @@
 
 所有重要的版本更新都会记录在此文件中。
 
+## [v0.6.3] - 2026-06-07
+
+### 📝 新增功能
+
+- **全面支持 Go / Java 常见日志时间格式，自动转换为东八区（CST）**
+  - 新增 `timefilter` 包级 `cst` 变量（`time.FixedZone("CST", 8*3600)`），所有无时区信息的时间字符串统一按 CST 解析
+  - `extractTimestamp` 新增 9 个正则模式，覆盖 8 种常见日志格式（详见下方格式表）
+  - `parseTime` 重构：优先解析带时区后缀的 ISO 8601 / RFC3339 格式（自动转 CST），其余无时区信息一律按 CST 解析
+  - 新增单元测试 `timefilter_test.go`，覆盖所有支持格式的解析正确性验证（15 个测试用例，100% PASS）
+
+- **支持的日志时间格式一览表**
+
+  | # | 格式类型 | 示例 | 来源 |
+  |---|---|---|---|
+  | ① | `[YYYY-MM-DD HH:MM:SS.mmm]` | `[2026-06-07 00:35:31.984]` | 通用（Go/Java 均常见） |
+  | ② | `YYYY-MM-DD HH:MM:SS` bare | `2026-06-07 00:35:31` | 通用 |
+  | ③ | `YYYY-MM-DDTHH:MM:SS.mmm±ZZ:ZZ` | `2026-06-07T00:35:31.984+08:00` | ISO 8601 |
+  | ④ | `YYYY/MM/DD HH:MM:SS` | `2026/06/07 01:15:40` | Go 常见 |
+  | ⑤ | `[I] YYYY/MM/DD HH:MM:SS file.go:123:` | `[I] 2026/06/07 01:15:40 hybrid_storage.go:330:` | Go 标准 log |
+  | ⑥ | `DD-MM-YYYY HH:MM:SS` | `07-06-2026 01:15:40.984` | Java Log4j/Logback 欧式 |
+  | ⑦ | `{"time":"..."}` JSON | `{"time":"2026-06-07T01:15:40.984+08:00"}` | Go slog / zap / logrus |
+  | ⑧ | `Mon DD, YYYY HH:MM:SS AM` | `Jun 07, 2026 1:15:40 AM` | Java Log4j 英文日期 |
+  | ⑨ | `YYYY-MM-DD HH:MM:SS,mmm` 逗号毫秒 | `2026-06-07 01:15:40,984` | 欧洲格式 |
+
+- **时区处理规则**
+  - 带时区后缀（如 `Z`、`+08:00`、`-0500`）→ 自动转换为 CST（东八区）
+  - 无时区后缀 → 一律按 CST（东八区）解析
+  - 示例：`2026-06-07T01:15:31Z`（UTC）→ 过滤时按 `2026-06-07 09:15:31 CST` 处理
+
+### 🐛 问题修复
+
+- **修复时间范围筛选后搜索结果为空的多个 Bug**
+  - `timefilter.parseTime` 增加毫秒时间戳支持（`"2006-01-02 15:04:05.999"`）
+  - `timefilter.extractTimestamp` 新增 Go 标准日志格式支持（`[I] 2026/06/07 01:15:40 ...`）
+  - `timefilter.parseTime` 新增 `"2006/01/02 15:04:05"` 和 `"2006/01/02 15:04"` 布局
+  - `server.buildOptsFromRequest` 改用 `time.ParseInLocation` 替代 `time.Parse`，修复 UTC 与本地时区偏差（CST 下相差 8 小时）
+  - `server.buildOptsFromRequest` 增加秒级格式兜底解析
+  - `server.applyTimeFilter` 格式化时间时保留秒和毫秒精度（`"2006-01-02 15:04:05.000"`）
+  - 前端 `SearchForm.vue`：`handleSearch` 增加 `timeRange` null 检查，修复清空时间范围后搜索静默失败
+  - `server.SearchRequest.summary()` 增加 `from`/`to` 字段输出，便于调试
+
 ## [v0.6.1](https://gitee.com/lorock/miaokun-log/releases/v0.6.1) - 2026-06-06
 
 ### 🐛 问题修复
