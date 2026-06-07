@@ -42,7 +42,6 @@
 
       <SearchForm
         :is-streaming="isStreaming"
-        :stats="stats"
         @search="handleSearch"
         @stop="stopSearch"
       />
@@ -78,7 +77,12 @@
       </el-alert>
 
       <div class="log-container">
-        <LogList :logs="logs" :is-streaming="isStreaming" :search-pattern="searchPattern" />
+        <LogList
+          :logs="logs"
+          :is-streaming="isStreaming"
+          :search-pattern="searchPattern"
+          :search-duration-ms="searchDurationMs"
+        />
       </div>
 
       <footer class="footer">
@@ -113,12 +117,13 @@ import SearchForm from './components/SearchForm.vue';
 import LogList from './components/LogList.vue';
 import type { SearchRequest } from './types';
 
-const { logs, stats, isStreaming, error, reachedLimit, displayTotal, displayCount, MAX_LOGS, start, stop: stopSearch } = useLogStream();
+const { logs, isStreaming, error, reachedLimit, displayTotal, displayCount, MAX_LOGS, start, stop: stopSearch, searchDurationMs } = useLogStream();
 const { version } = useVersion();
 const { user, logout } = useAuth();
 
 const logoZoomed = ref(false);
 const searchPattern = ref('');
+const hasSearched = ref(false);
 
 const handleUnauthorized = (event: Event) => {
   const customEvent = event as CustomEvent;
@@ -140,6 +145,7 @@ const toggleLogoZoom = () => {
 
 const handleSearch = (request: SearchRequest) => {
   searchPattern.value = request.pattern;
+  hasSearched.value = true;
   start(request);
 };
 

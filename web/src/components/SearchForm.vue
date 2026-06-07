@@ -11,27 +11,7 @@
           @keyup.enter="handleSearch"
           clearable
         />
-        
-        <!-- 统计信息 -->
-        <div class="stats-bar">
-          <div class="stat-item">
-            <span class="stat-value">{{ stats.total }}</span>
-            <span class="stat-label">总匹配</span>
-          </div>
-          <div v-if="stats.by_level?.ERROR" class="stat-item">
-            <span class="stat-value stat-error">{{ stats.by_level.ERROR }}</span>
-            <span class="stat-label">ERROR</span>
-          </div>
-          <div v-if="stats.by_level?.WARN" class="stat-item">
-            <span class="stat-value stat-warn">{{ stats.by_level.WARN }}</span>
-            <span class="stat-label">WARN</span>
-          </div>
-          <div v-if="stats.by_level?.INFO" class="stat-item">
-            <span class="stat-value stat-info">{{ stats.by_level.INFO }}</span>
-            <span class="stat-label">INFO</span>
-          </div>
-        </div>
-        
+
         <div class="search-buttons">
           <el-button
             type="primary"
@@ -52,6 +32,26 @@
             ⏹ 停止
           </el-button>
         </div>
+      </div>
+
+      <!-- 搜索历史 -->
+      <div v-if="searchHistory.length > 0" class="history-bar">
+        <span class="history-label">🕓 最近搜索</span>
+        <span
+          v-for="(item, idx) in searchHistory"
+          :key="idx"
+          class="history-pill"
+          @click="applyHistory(item)"
+          :title="buildHistoryTip(item)"
+        >
+          <span v-if="item.level" class="hlevel" :class="'hlevel-' + item.level.toLowerCase()">{{ item.level }}</span>
+          <span class="hpattern">{{ item.pattern }}</span>
+          <span v-if="item.timeRange && item.timeRange.length === 2" class="htime">📅</span>
+          <span v-if="item.paths && item.paths.length > 0" class="hpaths">{{ item.paths.length }}📁</span>
+        </span>
+        <span class="history-clear" @click="clearHistory" title="清空历史">
+          ✕ 清空
+        </span>
       </div>
 
       <!-- 高级筛选区 -->
@@ -247,12 +247,11 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue';
 
-import type { LogStats, SearchRequest, FileInfo } from '../types';
+import type { SearchRequest, FileInfo } from '../types';
 import FileBrowserModal from './FileBrowserModal.vue';
 
 defineProps<{
   isStreaming: boolean;
-  stats: LogStats;
 }>();
 
 const emit = defineEmits<{
@@ -374,6 +373,105 @@ const availablePaths = ref<PathCandidate[]>([]);
 const pathsLoading = ref(false);
 const activeFilters = ref<string[]>([]);
 
+// ===== 搜索历史 =====
+interface HistoryItem {
+  pattern: string;
+  level: string;
+  caseInsensitive: boolean;
+  sinceDays: number;
+  before: number;
+  after: number;
+  showContext: boolean;
+  timeRange: string[];
+  paths: string[];
+  ts: number;
+}
+
+const HISTORY_KEY = 'miaokun.search.history.v2';
+const HISTORY_MAX = 10;
+
+const loadHistory = (): HistoryItem[] => {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY);
+    if (!raw) return [];
+    return JSON.parse(raw) as HistoryItem[];
+  } catch {
+    return [];
+  }
+};
+
+const searchHistory = ref<HistoryItem[]>(loadHistory());
+
+const saveHistoryToStorage = () => {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(searchHistory.value));
+  } catch {
+    // ignore storage errors
+  }
+};
+
+const addToHistory = () => {
+  const pattern = form.pattern.trim();
+  if (!pattern) return;
+  // 去重（按关键词去重，最近的放到前面）
+  const filtered = searchHistory.value.filter(
+    (h) => h.pattern.toLowerCase() !== pattern.toLowerCase(),
+  );
+  const item: HistoryItem = {
+    pattern,
+    level: form.level,
+    caseInsensitive: form.caseInsensitive,
+    sinceDays: form.sinceDays,
+    before: form.before,
+    after: form.after,
+    showContext: form.showContext,
+    timeRange: [...form.timeRange],
+    paths: [...selectedPaths.value],
+    ts: Date.now(),
+  };
+  searchHistory.value = [item, ...filtered].slice(0, HISTORY_MAX);
+  saveHistoryToStorage();
+};
+
+const applyHistory = (item: HistoryItem) => {
+  form.pattern = item.pattern;
+  form.level = item.level;
+  form.caseInsensitive = item.caseInsensitive;
+  form.sinceDays = item.sinceDays;
+  form.before = item.before;
+  form.after = item.after;
+  form.showContext = item.showContext;
+  form.timeRange = [...item.timeRange];
+  selectedPaths.value = [...item.paths];
+};
+
+const buildHistoryTip = (item: HistoryItem): string => {
+  const parts: string[] = ['点击填充完整搜索条件：'];
+  if (item.level) parts.push(`级别: ${item.level}`);
+  if (item.timeRange && item.timeRange.length === 2) {
+    parts.push(`时间: ${item.timeRange[0]} ~ ${item.timeRange[1]}`);
+  }
+  if (item.paths && item.paths.length > 0) {
+    parts.push(`路径 (${item.paths.length}): ${item.paths.join(', ')}`);
+  }
+  parts.push(`不区分大小写: ${item.caseInsensitive ? '是' : '否'}`);
+  if (item.showContext) {
+    parts.push(`上下文: 前 ${item.before} 行 / 后 ${item.after} 行`);
+  }
+  return parts.join('\n');
+};
+
+const clearHistory = () => {
+  searchHistory.value = [];
+  try {
+    localStorage.removeItem(HISTORY_KEY);
+  } catch {
+    // ignore
+  }
+};
+
+// ===== 搜索历史 END =====
+
 const formatSize = (bytes: number) => {
   if (bytes === 0) return '';
   if (bytes < 1024) return bytes + ' B';
@@ -415,6 +513,9 @@ onMounted(() => {
 
 const handleSearch = () => {
   if (!form.pattern.trim()) return;
+
+  // 保存到搜索历史
+  addToHistory();
 
   const request: SearchRequest = {
     pattern: form.pattern.trim(),
@@ -462,47 +563,6 @@ const handleSearch = () => {
 .search-input {
   flex: 1;
   min-width: 200px;
-}
-
-/* 统计信息栏 */
-.stats-bar {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 8px 16px;
-  background: linear-gradient(135deg, rgba(79, 70, 229, 0.08) 0%, rgba(99, 102, 241, 0.05) 100%);
-  border: 1px solid rgba(99, 102, 241, 0.15);
-  border-radius: 8px;
-}
-
-.stat-item {
-  display: flex;
-  align-items: baseline;
-  gap: 4px;
-}
-
-.stat-value {
-  font-size: 16px;
-  font-weight: 600;
-  color: #4f46e5;
-  min-width: 32px;
-}
-
-.stat-error {
-  color: #dc2626;
-}
-
-.stat-warn {
-  color: #d97706;
-}
-
-.stat-info {
-  color: #2563eb;
-}
-
-.stat-label {
-  font-size: 12px;
-  color: #64748b;
 }
 
 .search-buttons {
@@ -601,6 +661,88 @@ const handleSearch = () => {
 .path-size {
   color: #909399;
   font-size: 12px;
+}
+
+/* 搜索历史 */
+.history-bar {
+  margin-top: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: rgba(148, 163, 184, 0.08);
+  border-radius: 6px;
+  border: 1px solid rgba(148, 163, 184, 0.12);
+}
+
+.history-label {
+  color: #64748b;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.history-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 3px 8px;
+  background: rgba(99, 102, 241, 0.1);
+  color: #4f46e5;
+  border-radius: 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s;
+  max-width: 320px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.history-pill:hover {
+  background: rgba(99, 102, 241, 0.18);
+  transform: translateY(-1px);
+}
+
+.hlevel {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+
+.hlevel-error   { background: rgba(220, 38, 38, 0.15);  color: #dc2626; }
+.hlevel-warn    { background: rgba(217, 119, 6, 0.15);   color: #d97706; }
+.hlevel-info    { background: rgba(37, 99, 235, 0.12);  color: #2563eb; }
+.hlevel-debug   { background: rgba(103, 194, 58, 0.12); color: #67c23a; }
+.hlevel-trace   { background: rgba(144, 147, 153, 0.12); color: #909399; }
+
+.hpattern {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 160px;
+}
+
+.htime,
+.hpaths {
+  color: #64748b;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.history-clear {
+  margin-left: auto;
+  color: #94a3b8;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.history-clear:hover {
+  color: #dc2626;
+  background: rgba(220, 38, 38, 0.08);
 }
 
 /* 响应式 - 小屏幕 */

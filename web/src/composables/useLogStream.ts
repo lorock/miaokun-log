@@ -25,6 +25,14 @@ export function useLogStream() {
   });
   const error = ref<string | null>(null);
   const reachedLimit = ref(false);
+  const searchDurationMs = ref(0);
+  
+  // 进度状态
+  const progress = ref({
+    currentFile: 0,
+    totalFiles: 0,
+    currentFileName: '',
+  });
   
   let abortController: AbortController | null = null;
   let pendingLogs: LogMatch[] = [];
@@ -56,6 +64,7 @@ export function useLogStream() {
     error.value = null;
     reachedLimit.value = false;
     isStreaming.value = true;
+    const startTime = performance.now();
 
     abortController = new AbortController();
     
@@ -129,6 +138,11 @@ export function useLogStream() {
                   stats.value.by_level[level] = 0;
                 }
                 stats.value.by_level[level]++;
+              } else if (data.type === 'progress') {
+                // 进度更新
+                progress.value.currentFile = data.data.current_file || 0;
+                progress.value.totalFiles = data.data.total_files || 0;
+                progress.value.currentFileName = data.data.file_name || '';
               } else if (data.type === 'done') {
                 console.log('搜索完成:', data.data);
               } else if (data.type === 'error') {
@@ -147,6 +161,7 @@ export function useLogStream() {
         updateTimer = null;
       }
       isStreaming.value = false;
+      searchDurationMs.value = Math.round(performance.now() - startTime);
     } catch (err) {
       if (err instanceof Error && err.name !== 'AbortError') {
         error.value = err.message;
@@ -157,6 +172,7 @@ export function useLogStream() {
         updateTimer = null;
       }
       isStreaming.value = false;
+      searchDurationMs.value = Math.round(performance.now() - startTime);
     }
   };
 
@@ -199,5 +215,7 @@ export function useLogStream() {
     stop,
     clear,
     MAX_LOGS,
+    searchDurationMs,
+    progress,
   };
 }
