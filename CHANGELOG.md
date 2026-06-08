@@ -75,6 +75,7 @@
 
 ### 🔧 技术改进
 
+- `go.mod`：Go 工具链版本升级 **1.25.9 → 1.25.11（go mod tidy / go build / go vet 全部通过）
 - `web/src/composables/useLogStream.ts`：新增 `searchDurationMs` 搜索耗时统计、`progress` 进度状态
 - `web/src/components/LogList.vue`：全面重构虚拟滚动逻辑，新增动态行高 `calcMatchRowHeight()`、`findMatches` 结果内搜索、`handleExport` 多格式导出、`copySingleLog`、时间跳转等
 - `web/src/components/SearchForm.vue`：新增 `addToHistory()` 完整搜索条件记录

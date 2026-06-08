@@ -1,6 +1,6 @@
 module gitee.com/lorock/miaokun-log
 
-go 1.25.9
+go 1.25.11
 
 require (
 	github.com/golang-jwt/jwt/v5 v5.3.1
